@@ -100,6 +100,8 @@ Tables and model outputs from statistical analyses.
 | `mm1_actionphase_target_dwelltime_zscores_lmer_output_table.csv` | Results of object-directed dwell time models (action phase).        |
 | `mm1_dwelltime_zscores_lmer_output_table.csv`                    | Results of dwell time at outcome analysis.                          |
 | `mm1_samplebased_lookingtime_zscores_lmer_output_table.csv`      | Results of sample-based looking time at outcome analysis.           |
+| `Table_S1_GAMM01.docx`                                           | Results of GAMM of pupil size data during action phase.             |
+
 
 ---
 
