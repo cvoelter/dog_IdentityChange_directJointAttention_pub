@@ -1,0 +1,37 @@
+Dog_ID,EDF1,EDF2,EDF3,EDF4,CDL_name,breed,sex,neutered,test_date,birth_date,age,trainer
+subj.01,Henry9_1/Henry9_2,Henry9_3/Henry9_4,Henry9_5,Henry9_6,Henry9,Mix,m,yes,13/02/2024,01/06/2022,20,Laura
+subj.02,Maylo_1/Maylo_2/Maylo_3,Maylo_4,Maylo_5,Maylo_6,Maylo,Mix,m,yes,13/02/2024,13/11/2015,99,Laura
+subj.03,Beny_1/Beny_2/Beny_3/Beny_4,Beny_5,Beny_6,Beny_7,Beny,Mix,m,yes,13/02/2024,28/04/2019,57,Laura
+subj.04,Mia_1,Mia_2,Mia_3,Mia_4,Mia11,Mix,f,no,14/02/2024,01/10/2018,64,Marion
+subj.05,Henry7_1/Henry7_2,Henry7_3/Henry7_4,Henry7_5,Henry7_6,Henry7,Mix,m,yes,15/02/2024,17/04/2020,45,Laura
+subj.06,Timo_1,Timo_2,Timo_3,Timo_4,Timo2,Mix,m,yes,15/02/2024,01/02/2019,60,Laura
+subj.07,Mailo_1,Mailo_2,Mailo_3,Mailo_4,Mailo,Mix,m,yes,15/02/2024,09/07/2015,103,Laura
+subj.08,George_1/George_2/George_3,George_4,George_5,George_6,George4,Collie,m,no,15/02/2024,12/04/2019,58,Laura
+subj.09,Mathild1/Mathild2/Mathild3/Mathild4,Mathild5,Mathild6,Mathild7/Mathild8,Mathilda3,Mix,f,no,15/02/2024,20/02/2022,23,Laura
+subj.10,Alaska_1,Alaska_2,Alaska_3/Alaska_4,Alaska_5/Alaska_6,Alaska2,Leisha Dog,f,no,16/02/2024,20/10/2019,51,Marion
+subj.11,Melody_1,Melody_2,Melody_3/Melody_4,Melody_5/Melody_6,Melody,Labrador Retriever,f,yes,20/02/2024,14/08/2018,66,Laura
+subj.12,Ace_1,Ace_2/Ace_3,Ace_4/Ace_5,Ace_6/Ace_7,Ace3,Border Collie,m,yes,23/02/2024,15/03/2019,59,Laura
+subj.13,CB_1,CB_2,CB_3,CB_4/CB_5,CB,Border Collie,f,yes,01/03/2024,17/02/2017,84,Marion
+subj.14,Knopfi_1,Knopfi_2,Knopfi_3/Knopfi_4,Knopfi_5,Knopfi,Australian Shepherd,m,yes,01/03/2024,26/10/2016,88,Marion
+subj.15,Zuzu_1/Zuzu_2,Zuzu_3,Zuzu_4,Zuzu_5,Zuzu,Mix,f,yes,04/03/2024,06/11/2020,39,Laura
+subj.16,Juna_1,Juna_2/Juna_3,Juna_4/Juna_5,Juna_6,Juna,Flat Coated Retriever,f,no,08/03/2024,06/02/2016,97,Laura
+subj.17,Tilda_1,Tilda_2/Tilda_3,Tilda_4,Tilda_5,Tilda2,Welsh Springer Spaniel,f,no,12/03/2024,17/06/2022,20,Laura
+subj.18,Kalea_1,Kalea_2,Kalea_3,Kalea_4,Kalea,Labrador Retriever,f,no,13/03/2024,18/08/2020,42,Marion
+subj.19,Lilly_1,Lilly_2,Lilly_3/Lilly_4,Lilly_5,Lilly9,Mix,f,yes,21/03/2024,07/09/2017,78,Laura
+subj.20,Vilma_1/Vilma_2,Vilma_3,Vilma_4,Vilma_5/Vilma_6,Vilma,Magyar Vizsla,f,no,22/03/2024,20/05/2022,22,Laura
+subj.21,Ori_1,Ori_2,Ori_3,Ori_4,Ori,Nova Scotia Duck tolling retriever,f,no,25/03/2024,03/03/2018,72,Marion
+subj.22,Ignaz_1/Ignaz_2,Iganz_3,Ignaz_4,Ignaz_5,Ignaz,Fox Terrier,m,yes,27/03/2024,15/01/2021,38,Marion
+subj.23,Striezi1,Striezi2,Striezi3,Striezi4,Striezi,Mix,m,yes,03/04/2024,01/09/2018,67,Marion
+subj.24,Edgar_1/Edgar_2,Edgar_3,Edgar_4/Edgar_5,Edgar_6,Edgar3,Mix,m,yes,04/04/2024,01/06/2019,58,Laura
+subj.25,Floki_1,,,,Floki,Australian Shepherd,m,no,07/04/2024,31/10/2021,29,Marion
+subj.26,Danny_1/Danny_2,Danny_3,Danny_4,Danny_5,Danny2,Magyar Vizsla,m,no,12/04/2024,20/02/2021,37,Marion
+subj.27,Nala_1/Nala_2/Nala_3,Nala_4,Nala_5/Nala_6,Nala_7/Nala_8,Nala13,Mix,f,no,16/04/2024,01/05/2020,47,Laura
+subj.28,Filou_1/Filou_2/Filou_3,Filou_4/Filou_5,Filou_6,Filou_7,Filou,Mix,m,yes,17/04/2024,02/06/2021,34,Marion
+subj.29,Hetti_1/Hetti_2,Hetti_3/Hetti_4,Hetti_5,Hetti_6,Hetti,Mix,f,no,23/05/2024,10/01/2019,64,Laura
+subj.30,Asta_1,Asta_2,Asta_3,Asta_4,Asta2,Border Collie,f,no,23/05/2024,05/10/2018,67,Laura
+subj.31,Lux_1/Lux_2,Lux_3/Lux_4,Lux_5,Lux_6/Lux_7,Lux,Border Collie,m,no,31/05/2024,02/06/2023,11,Marion
+subj.32,Joker_1/Joker_2,Joker_3,Joker_4/Joker_5,Joker_6,Joker4,Australian Shepherd,m,no,09/07/2024,18/08/2016,94,Laura
+subj.33,Kelly_1/Kelly_2,Kelly_3,Kelly_4,Kelly_5,Kelly2,Australian Shepherd,f,no,16/07/2024,13/03/2022,28,Laura
+subj.34,Alba_1/Alba_2,Alba_3,Alba_4,Alba_5/Alba_6,Alba,Labrador Retriever,f,no,29/07/2024,05/05/2020,50,Marion
+subj.35,Raya_1,,,,Raya,Mix,f,no,22/08/2024,01/04/2022,28,Laura
+subj.36,Milo_1,Milo_2,Milo_3/Milo_4,Milo_5,Milo7,Australian Shepherd,m,no,29/08/2024,20/04/2019,64,Laura

@@ -1,0 +1,1055 @@
+---
+title: Dog Identity Change: Dwell time analysis
+author: Christoph Voelter, Andrea Sommese
+date: 20/12/2024
+output: html_document
+---
+notes: 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(tidyverse)
+library(glmmTMB)
+
+source("./functions/diagnostic_fcns.r")
+source("./functions/glmm_stability.r")
+source("./functions/boot_glmm.r")
+source("./functions/boot_glmm2.r")
+source("./functions/glmmTMB_stability.r")
+source("./functions/drop1_para_glmmtmb.r")
+source("./functions/extract_ranef_gmmTMB.r")
+source("./functions/boot_glmmTMB.r")
+
+#load(file = "workspaces/dog_identity_change_AOIreport_analysis.RData")
+```
+
+### Notes:
+
+36 dogs started with the experiment but only 34 completed all test sessions. One additional dog (Floki) completed the first test session (included). Another dog (Raya) started with the pretest but became unavailable before the start of the test phase. 
+
+Saved with the IP relative setting in DataViewer.
+
+
+### Read Data
+*IA report
+```{r}
+aoi_data <- read_delim("data/dog_identity_change_IA_report.txt", na=".", delim="\t")
+table(aoi_data$IA_LABEL, aoi_data$IP_LABEL)
+
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+
+length(levels(as.factor(aoi_data$subject_session)))
+
+aoi_data_filter <- aoi_data %>%
+  group_by(RECORDING_SESSION_LABEL, trial_overall)%>%
+  summarise(filter_variable = sum(IA_AVERAGE_FIX_PUPIL_SIZE, na.rm = TRUE))%>%
+  ungroup()%>%
+  mutate(filter_variable = ifelse(filter_variable == 0, NA, 1))
+
+aoi_data <- aoi_data %>%
+  inner_join(aoi_data_filter) %>%
+  filter(filter_variable == 1) %>% # retain only trials in which the pupil was detected
+  filter(test_phase %in% c("FIRST-TEST")) %>% #retain only test trials
+  filter(
+    !RECORDING_SESSION_LABEL %in% c("Hetti_3", "Melody_5", "Milo_3"),
+    !(RECORDING_SESSION_LABEL == "Joker_4" &
+        trial_overall == 8),
+    !(RECORDING_SESSION_LABEL == "Mathild2" &
+        trial_overall == 2),
+    !(RECORDING_SESSION_LABEL == "Melody_3" &
+        trial_overall == 9)
+  ) # remove trials in which they've left the chin rest or that were conducted twice due to an experimenter mistake (N=1)
+  
+```
+* demographic data
+
+```{r}
+demo.data <- read_csv("data/dog_identity_change_counterbalancing_exp1.csv")%>%
+  rename(subject = "Dog_ID")
+```
+
+
+```{r}
+xdata <- aoi_data %>%
+  dplyr::select(
+    RECORDING_SESSION_LABEL,
+    subject,
+    subject_session,
+    IP_LABEL,
+    IA_LABEL,
+    IA_ID,
+    Trial_Index_,
+    trial_overall,
+    condition,
+    test_phase,
+    session,
+    session_type,
+    outcome,
+    object,
+    object_pos,
+    object_outcome,
+    object_pos_outcome,
+    actor,
+    position,
+    video_file_cue,
+    video_file_outcome,
+    DATA_FILE,
+    IA_AREA,
+    IA_AVERAGE_FIX_PUPIL_SIZE,
+    IA_DWELL_TIME,
+    "IA_DWELL_TIME_per"="IA_DWELL_TIME_%",
+    IA_FIXATION_COUNT,
+    IA_FIRST_FIXATION_TIME,
+    IA_FIRST_FIXATION_DURATION,
+    IA_FIRST_RUN_DWELL_TIME,
+    IA_FIRST_RUN_START_TIME,
+    IA_FIRST_RUN_END_TIME,
+    IA_MAX_FIX_PUPIL_SIZE,
+    INTEREST_AREA_FIXATION_SEQUENCE,
+    TRIAL_DWELL_TIME,
+    TRIAL_FIXATION_COUNT,
+    TRIAL_IA_COUNT,
+    TRIAL_TOTAL_VISITED_IA_COUNT,
+    IP_START_TIME,
+    IP_END_TIME
+  ) %>%
+  mutate(IP_DURATION = IP_END_TIME - IP_START_TIME,
+         FIRST_RUN_DURATION = IA_FIRST_RUN_END_TIME - IA_FIRST_RUN_START_TIME)%>%
+  full_join(demo.data)%>%
+  mutate(IA_LABEL = dplyr::recode(as.factor(IA_LABEL), upper_object="up", lower_object="down", actor_left="left", actor_right="right"))%>%
+  mutate(target_object_IA = ifelse(IP_LABEL== "first_video" & IA_LABEL==object_pos, "target",
+                                   ifelse(IP_LABEL== "outcome_video" & IA_LABEL==object_pos_outcome, "target", NA)),
+         actor_IA = ifelse(IA_LABEL==position, "actor", NA))
+  
+
+table(xdata$condition, xdata$subject)
+table(xdata$condition, xdata$TRIAL_TOTAL_VISITED_IA_COUNT)
+levels(as.factor(xdata$IA_LABEL))
+levels(as.factor(xdata$IP_LABEL))
+levels(as.factor(xdata$actor_IA))
+levels(as.factor(aoi_data$IA_LABEL))
+hist(xdata$FIRST_RUN_DURATION)
+```
+
+### Inclusion criteria
+
+
+```{r}
+gaze_detected_per_action <- xdata%>%
+  filter(!is.na(condition), target_object_IA== "target") %>%
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL) %>%
+  summarise(IP_dwell_prop = TRIAL_DWELL_TIME/IP_DURATION)%>%
+  ungroup()%>%
+  filter(IP_LABEL == "first_video", IP_dwell_prop<0.7)
+#8 trials should be removed because the dogs' dwell time is less than 70% of the first video
+
+gaze_detected_per_outcome <- xdata%>%
+  filter(!is.na(condition), target_object_IA== "target") %>%
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL, target_object_IA, outcome) %>%
+  summarise(mean_object_IA_dwell = sum(IA_DWELL_TIME))%>%
+  ungroup()%>%
+  filter(IP_LABEL == "outcome_video", mean_object_IA_dwell<100)#117 observations are removed because dogs are looking less than 100 ms at the target in the outcome phase
+
+
+filter_data_actionphase <- gaze_detected_per_action %>%
+  dplyr::select(-IP_dwell_prop, -IP_LABEL)
+
+filter_data_outcome <- gaze_detected_per_outcome %>%
+  dplyr::select(-mean_object_IA_dwell, -IP_LABEL)
+```
+
+
+# Dwell time data
+## Gamma model
+
+
+```{r}
+outcome_target_data <- xdata %>%
+  filter(!is.na(condition),
+         target_object_IA == "target",
+         IP_LABEL == "outcome_video") %>%
+  anti_join(filter_data_actionphase) %>%
+  anti_join(filter_data_outcome) %>%
+  mutate(trial = as.numeric(
+    ifelse(
+      trial_overall > 3 & trial_overall < 7,
+      trial_overall - 3,
+      ifelse(
+        trial_overall > 6 &
+          trial_overall < 10,
+        trial_overall - 6,
+        ifelse(trial_overall > 9, trial_overall -
+                 9, trial_overall)
+      )
+    )
+  )) %>%
+  filter(IA_FIRST_FIXATION_TIME > 0) # only dogs that actively look at object
+
+
+outcome_target_data_agg2 <- outcome_target_data %>%
+  group_by(subject) %>%
+  summarise(mean_latency = mean(IA_FIRST_FIXATION_TIME, na.rm=TRUE),
+            sd_latency = sd(IA_FIRST_FIXATION_TIME, na.rm=TRUE),
+            mean_individual_dwell_time = mean(IA_DWELL_TIME, na.rm=TRUE),
+            sd_individual_dwell_time = sd(IA_DWELL_TIME, na.rm=TRUE))
+
+outcome_target_data <- outcome_target_data %>%
+  full_join(outcome_target_data_agg2)%>%
+  mutate(latency_z = (IA_FIRST_FIXATION_TIME-mean_latency)/sd_latency,
+         dwell_time_z = (IA_DWELL_TIME-mean_individual_dwell_time)/sd_individual_dwell_time)
+
+hist(log(outcome_target_data$IA_DWELL_TIME))
+hist(outcome_target_data$IA_DWELL_TIME)
+levels(as.factor(outcome_target_data$trial_overall))
+levels(as.factor(outcome_target_data$trial))
+levels(as.factor(outcome_target_data$session))
+levels(as.factor(outcome_target_data$condition))
+levels(as.factor(outcome_target_data$outcome))
+levels(as.factor(outcome_target_data$object_pos_outcome))
+levels(as.factor(outcome_target_data$subject))
+
+length(levels(as.factor(outcome_target_data$subject)))
+table(outcome_target_data$subject, outcome_target_data$condition)
+table(outcome_target_data$session, outcome_target_data$trial)
+```
+
+* Descriptives
+```{r}
+outcome_target_data_descriptives <- outcome_target_data %>%
+  group_by(condition,outcome)%>%
+  summarise(mean_dwell = mean(IA_DWELL_TIME, na.rm=TRUE),
+            se_dwell = sd(IA_DWELL_TIME, na.rm=TRUE)/sqrt(length(IA_DWELL_TIME)))
+
+outcome_target_data_descriptives2 <- outcome_target_data %>%
+  group_by(condition, outcome, subject) %>%
+  summarise(mean_dwell = mean(IA_DWELL_TIME, na.rm = TRUE)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = condition, values_from = mean_dwell) %>%
+  mutate(diff_dwell = COM - NCOM) %>%
+  group_by(outcome) %>%
+  summarise(
+    mean_dwell_diff = mean(diff_dwell, na.rm = TRUE),
+    se_dwell_diff = sd(diff_dwell, na.rm = TRUE) / sqrt(length(diff_dwell))
+  )
+  
+```
+
+
+```{r}
+contr <-
+  glmmTMBControl(optCtrl = list(iter.max = 100000000, eval.max = 100000000))
+```
+
+prepare predictor variables
+```{r}
+outcome_target_data$z.trial<-as.vector(scale(outcome_target_data$trial, center = TRUE, scale=TRUE))
+outcome_target_data$z.trial2<-as.vector(scale(outcome_target_data$trial_overall, center = TRUE, scale=TRUE))
+outcome_target_data$z.session<-as.vector(scale(as.numeric(outcome_target_data$session), center = TRUE, scale=TRUE))
+
+outcome_target_data$outcome<-relevel(as.factor(outcome_target_data$outcome), ref = "NO")
+levels(outcome_target_data$outcome)
+outcome_target_data$condition.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$condition)), center = TRUE, scale = FALSE))
+outcome_target_data$object_pos_outcome.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$object_pos_outcome)), center = TRUE, scale = FALSE))
+outcome_target_data$outcome.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$outcome)), center = TRUE, scale = FALSE))
+summary(outcome_target_data)
+```
+
+
+
+
+fit model
+```{r}
+
+m1_dwelltime_outcome = glmmTMB(
+ IA_DWELL_TIME ~ condition*outcome +object_pos_outcome+ z.trial2+
+    (1 +  object_pos_outcome.c+ z.trial2 +condition.c || subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_outcome)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_outcome, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+--> assumptions violated
+
+### lmer approach using within-subject z scores
+
+
+```{r}
+library(lme4)
+m1_dwelltime_outcome_lmer_lme4 = lme4::lmer(
+  dwell_time_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+drop1(m1_dwelltime_outcome_lmer_lme4, test = "Chisq")
+m1_dwelltime_outcome_lmer_lme4_null = lme4::lmer(
+  dwell_time_z ~ 1 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+anova(m1_dwelltime_outcome_lmer_lme4, m1_dwelltime_outcome_lmer_lme4_null, test="Chisq")
+```
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_outcome_lmer_lme4)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_outcome_lmer_lme4, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+
+
+Assumptions and stability
+```{r}
+diagnostics.plot(m1_dwelltime_outcome_lmer_lme4)
+ranef.diagn.plot(m1_dwelltime_outcome_lmer_lme4)
+```
+LRT
+```{r}
+m1_dwelltime_outcome_lmer_lme4_drop1 <- drop1(m1_dwelltime_outcome_lmer_lme4, test="Chisq")
+m1_dwelltime_outcome_lmer_lme4_drop1
+m1_dwelltime_outcome_lmer_lme4_drop1<- m1_dwelltime_outcome_lmer_lme4_drop1%>% 
+  filter(!is.na(npar)) %>% 
+  add_row(npar = rep(NA,4),  .before = 1) %>% 
+  add_row(npar = rep(NA,1),  .after = 7) 
+```
+
+```{r}
+library(lmerTest)
+m1_dwelltime_outcome_lmertest = lmerTest::lmer(
+  dwell_time_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_outcome_lmertest)
+diagnostics.plot(m1_dwelltime_outcome_lmertest)
+```
+
++ Collinearity checks
+```{r}
+library(car)
+xx=lm(dwell_time_z ~ condition+outcome +object_pos_outcome+ z.trial2, data=outcome_target_data)
+vif(xx)
+```
+
+Relevelling of reference category of outcome condition
+```{r}
+
+outcome_target_data$outcome_rel <- relevel(as.factor(outcome_target_data$outcome), ref="IDENTITY")
+outcome_target_data$outcome_rel2 <- relevel(as.factor(outcome_target_data$outcome), ref="LOCATION")
+
+
+m1_dwelltime_outcome_lmertest_rel1 = lmerTest::lmer(
+  dwell_time_z ~ condition*outcome_rel +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+m1_dwelltime_outcome_lmertest_rel2 = lmerTest::lmer(
+  dwell_time_z ~ condition*outcome_rel2 +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_outcome_lmertest_rel1)
+summary(m1_dwelltime_outcome_lmertest_rel2)
+```
+ + confidence intervals
+
+```{r}
+boot.m1_dwelltime_outcome_lmer_lme4=boot.lmer(model.res=m1_dwelltime_outcome_lmer_lme4, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=1000, level=0.95)
+
+res.m1_dwelltime_outcome_lmer_lme4<-round(boot.m1_dwelltime_outcome_lmer_lme4$ci.estimates, 3)
+res.m1_dwelltime_outcome_lmer_lme4
+```
+
+##### Output table
+```{r}
+
+model_table_m1_dwelltime_outcome_lmer_lme4<- bind_cols(as.data.frame(summary(m1_dwelltime_outcome_lmer_lme4)$coefficients[,1:2]),
+                             summary(m1_dwelltime_outcome_lmertest)$coefficients[,3:5],
+                             res.m1_dwelltime_outcome_lmer_lme4,
+                             m1_dwelltime_outcome_lmer_lme4_drop1)%>%
+  select(Estimate, SE = `Std. Error`, t =`t value`, df, p=`Pr(>|t|)`, LowerCI = X2.5., UpperCI = X97.5., Chi2 = LRT, df_LRT = npar, p_LRT = `Pr(Chi)`,) %>%  
+  mutate(across(.cols = c(p, p_LRT), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:t), ~ format(round(.x, 2), nsmall=2))) %>% 
+  mutate(across(.cols = c(LowerCI:Chi2), ~ format(round(.x, 2), nsmall=2))) 
+
+
+write.csv(model_table_m1_dwelltime_outcome_lmer_lme4, file = "saves/mm1_dwelltime_zscores_lmer_output_table.csv")
+```
+
+
+
+
+### Latency data
+```{r}
+hist(outcome_target_data$IA_FIRST_FIXATION_TIME)
+min(outcome_target_data$IA_FIRST_FIXATION_TIME)
+
+```
+
+
+fit model
+```{r}
+library(lme4)
+
+m1_latency_z_outcome_lmer_lme4 = lme4::lmer(
+  latency_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+m1_dwelltime_outcome_lmer_lme4_null = lme4::lmer(
+  latency_z ~ 1+
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+anova(m1_latency_z_outcome_lmer_lme4, m1_dwelltime_outcome_lmer_lme4_null, test="Chisq")
+```
+
+Assumptions and stability
+```{r}
+diagnostics.plot(m1_latency_z_outcome_lmer_lme4)
+ranef.diagn.plot(m1_latency_z_outcome_lmer_lme4)
+```
+
+
+```{r}
+library(lmerTest)
+m1_latency_z_outcome_lmer_lmertest = lmerTest::lmer(
+  latency_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject), 
+  data = outcome_target_data,
+  REML = TRUE)
+summary(m1_latency_z_outcome_lmer_lmertest)
+```
+
+
+Relevelling of reference category of outcome condition
+```{r}
+
+outcome_target_data$outcome_rel <- relevel(as.factor(outcome_target_data$outcome), ref="IDENTITY")
+outcome_target_data$outcome_rel2 <- relevel(as.factor(outcome_target_data$outcome), ref="LOCATION")
+
+
+m1_latency_z_outcome_lmer_lmertest_rel = lmerTest::lmer(
+  latency_z ~ condition*outcome_rel +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject), 
+  data = outcome_target_data,
+  REML = TRUE)
+
+m1_latency_z_outcome_lmer_lmertest_rel2 = lmerTest::lmer(
+  latency_z ~ condition*outcome_rel2 +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject), 
+  data = outcome_target_data,
+  REML = TRUE)
+
+summary(m1_latency_z_outcome_lmer_lmertest_rel)
+summary(m1_latency_z_outcome_lmer_lmertest_rel2)
+```
+
+LRT
+```{r}
+m1_latency_z_outcome_lmer_lme4_drop1 <- drop1(m1_latency_z_outcome_lmer_lme4, test="Chisq")
+m1_latency_z_outcome_lmer_lme4_drop1
+m1_latency_z_outcome_lmer_lme4_drop1<- m1_latency_z_outcome_lmer_lme4_drop1%>% 
+  filter(!is.na(npar)) %>% 
+  add_row(npar = rep(NA,4),  .before = 1) %>% 
+  add_row(npar = rep(NA,1),  .after = 7) 
+```
+
+
++ Collinearity checks
+```{r}
+library(car)
+xx=lm(latency_z ~ condition+outcome +object_pos_outcome+ z.trial2,  data = outcome_target_data)
+vif(xx)
+```
+
++ confidence intervals
+
+```{r}
+boot.m1_latency_z_outcome_lmer_lme4=boot.lmer(model.res=m1_latency_z_outcome_lmer_lme4, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=1000, level=0.95)
+
+res.m1_latency_z_outcome_lmer_lme4<-round(boot.m1_latency_z_outcome_lmer_lme4$ci.estimates, 3)
+res.m1_latency_z_outcome_lmer_lme4
+```
+
+##### Output table: latency of first fixation
+
+```{r}
+
+m1_latencyfirstfix_outcome_table<- bind_cols(as.data.frame(summary(m1_latency_z_outcome_lmer_lme4)$coefficients[,1:2]),
+                             summary(m1_latency_z_outcome_lmer_lmertest)$coefficients[,3:5],
+                             res.m1_latency_z_outcome_lmer_lme4,
+                             m1_latency_z_outcome_lmer_lme4_drop1)%>%
+  select(Estimate, SE = `Std. Error`, t =`t value`, df, p=`Pr(>|t|)`, LowerCI = X2.5., UpperCI = X97.5., Chi2 = LRT, df_LRT = npar, p_LRT = `Pr(Chi)`,) %>%  
+  mutate(across(.cols = c(p, p_LRT), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:t), ~ format(round(.x, 2), nsmall=2))) %>% 
+  mutate(across(.cols = c(LowerCI:Chi2), ~ format(round(.x, 2), nsmall=2))) 
+
+write.csv(m1_latencyfirstfix_outcome_table, file = "saves/m1_latencyfirstfix_outcome_table_final.csv")
+```
+
+
+
+
+
+### First look analysis (duration of first run)
+
+fit model
+```{r}
+m1_firstlook_outcome = glmmTMB(
+  FIRST_RUN_DURATION ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+m1_firstlook_outcome_null = glmmTMB(
+  FIRST_RUN_DURATION ~ 1+
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+anova(m1_firstlook_outcome, m1_firstlook_outcome_null, test="Chisq") #full null not significant
+summary(m1_firstlook_outcome)
+drop1(m1_firstlook_outcome, test = "Chisq")
+```
+
+```{r}
+m2_firstlook_outcome = glmmTMB(
+  FIRST_RUN_DURATION ~ condition+outcome +object_pos_outcome+ 
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+
+m2_firstlook_outcome_null = glmmTMB(
+  FIRST_RUN_DURATION ~ 1 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+anova(m2_firstlook_outcome, m2_firstlook_outcome_null, test="Chisq")
+summary(m2_firstlook_outcome)
+drop1(m2_firstlook_outcome, test = "Chisq")
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_firstlook_outcome)
+simulationOutput <- simulateResiduals(fittedModel = m1_firstlook_outcome, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+LRT
+```{r}
+m1_firstlook_outcome_drop1 <- drop1(m1_firstlook_outcome, test="Chisq")
+m1_firstlook_outcome_drop1
+m1_firstlook_outcome_drop1<- m1_firstlook_outcome_drop1%>% 
+  filter(!is.na(Df)) %>% 
+  add_row(Df = rep(NA,4),  .before = 1) %>% 
+  add_row(Df = rep(NA,1),  .after = 7) 
+```
+ 
+
++ check for overdispersion
+```{r}
+overdisp.test(m1_firstlook_outcome)
+```
+--> quite underdispersed
+
++ Collinearity checks
+```{r}
+library(car)
+xx=lm(FIRST_RUN_DURATION ~ condition+outcome +object_pos_outcome+ z.trial2,  data = outcome_target_data)
+vif(xx)
+```
+
+```{r eval=FALSE}
+m1_firstlook_outcome.ci=boot.glmmtmb(m1_firstlook_outcome, 
+nboots=1000, para=T, n.cores=2, resol=1000, level=0.95, data=  outcome_target_data,
+)
+```
+
+#### output table: first look
+
+```{r}
+m1_firstlook_outcome_table <- bind_cols(as.data.frame(summary(m1_firstlook_outcome)$coefficients$cond),
+                                      m1_firstlook_outcome_drop1,
+                                     m1_firstlook_outcome.ci$ci.estimates$fe[1:8,]) %>%
+  dplyr::select(Estimate, SE = `Std. Error`, LowerCI = X2.5., UpperCI = X97.5.,Chi2 = LRT, df = Df, p = `Pr(>Chi)`, z_wald=`z value`, p_wald=`Pr(>|z|)`) %>% # 
+  mutate(across(.cols = c(p), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:Chi2), ~ format(round(.x, 2), nsmall=2))) %>% 
+  #mutate(across(Chi2:p, ~replace_na(.x, "")))%>%
+  mutate(p=replace(p, p==0, "<0.001"))
+
+write.csv(m1_firstlook_outcome_table, file = "saves/m1_firstlookdwell_outcome_table_final.csv")
+```
+
+
+# Action phase analysis
+### Dwell time to object
+```{r}
+actionphase_target_data <- xdata%>%
+  filter(!is.na(condition), IP_LABEL=="first_video", target_object_IA== "target")%>%
+  anti_join(filter_data_actionphase)%>%
+  mutate(trial = as.numeric(ifelse(trial_overall>3 & trial_overall<7, trial_overall-3,
+                        ifelse(trial_overall>6 & trial_overall<10, trial_overall-6,                               ifelse(trial_overall>9, trial_overall-9,trial_overall)))))
+
+actionphase_target_data_agg <- actionphase_target_data %>%
+  group_by(subject) %>%
+  summarise(mean_individual_dwell_time = mean(IA_DWELL_TIME, na.rm=TRUE),
+            sd_individual_dwell_time = sd(IA_DWELL_TIME, na.rm=TRUE))
+
+actionphase_target_data <- actionphase_target_data %>%
+  full_join(actionphase_target_data_agg)%>%
+  mutate(dwell_time_z = (IA_DWELL_TIME-mean_individual_dwell_time)/sd_individual_dwell_time)
+
+actionphase_target_data$z.trial2<-as.vector(scale(actionphase_target_data$trial_overall, center = TRUE, scale=TRUE))
+actionphase_target_data$condition.c <- as.vector(scale(as.numeric(as.factor(actionphase_target_data$condition)), center = TRUE, scale = FALSE))
+actionphase_target_data$object_pos.c <- as.vector(scale(as.numeric(as.factor(actionphase_target_data$object_pos)), center = TRUE, scale = FALSE))
+
+```
+
+
+fit model
+```{r}
+min(actionphase_target_data$IA_DWELL_TIME)
+actionphase_target_data$IA_DWELL_TIME_gamma <- actionphase_target_data$IA_DWELL_TIME +1
+m1_dwelltime_actionphase_target_gamma = glmmTMB(
+  IA_DWELL_TIME_gamma ~ condition + object_pos + z.trial2 +
+    (1 + object_pos.c+ z.trial2 + condition.c|| subject), 
+  data = actionphase_target_data,
+  family = Gamma(link="log")
+)
+
+
+
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_actionphase_target_gamma)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_actionphase_target_gamma, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+```{r}
+library(lme4)
+m1_dwelltime_actionphase_target_lmer_lme4 = lme4::lmer(
+  dwell_time_z ~ condition + object_pos + z.trial2 +
+    (1 + object_pos+ z.trial2 + condition.c| subject), 
+  data = actionphase_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+drop1(m1_dwelltime_actionphase_target_lmer_lme4, test = "Chisq")
+m1_dwelltime_actionphase_target_lmer_lme4_null = lme4::lmer(
+  dwell_time_z ~ 1+
+    (1 + object_pos+ z.trial2 + condition.c| subject), #pruned due to convergence warning
+  data = actionphase_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+anova(m1_dwelltime_actionphase_target_lmer_lme4, m1_dwelltime_actionphase_target_lmer_lme4_null, test="Chisq")
+```
+
+
+Assumptions and stability
+```{r}
+diagnostics.plot(m1_dwelltime_actionphase_target_lmer_lme4)
+ranef.diagn.plot(m1_dwelltime_actionphase_target_lmer_lme4)
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_actionphase_target_lmer_lme4)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_actionphase_target_lmer_lme4, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+
+
+LRT
+```{r}
+m1_dwelltime_actionphase_target_lmer_lme4_drop1 <- drop1(m1_dwelltime_actionphase_target_lmer_lme4, test="Chisq")
+m1_dwelltime_actionphase_target_lmer_lme4_drop1
+m1_dwelltime_actionphase_target_lmer_lme4_drop1<- m1_dwelltime_actionphase_target_lmer_lme4_drop1%>% 
+  filter(!is.na(npar)) %>% 
+  add_row(npar = rep(NA,1),  .before = 1) 
+```
+
+```{r}
+library(lmerTest)
+m1_dwelltime_actionphase_target_lmertest = lmerTest::lmer(
+  dwell_time_z ~ condition+object_pos+ z.trial2 +
+    (1 + object_pos+ z.trial2 + condition.c| subject), #pruned due to convergence warning
+  data = actionphase_target_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_actionphase_target_lmertest)
+diagnostics.plot(m1_dwelltime_actionphase_target_lmertest)
+```
+
+ + confidence intervals
+
+```{r}
+boot.m1_dwelltime_actionphase_target_lmer_lme4=boot.lmer(model.res=m1_dwelltime_actionphase_target_lmer_lme4, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=1000, level=0.95)
+
+res.m1_dwelltime_actionphase_target_lmer_lme4<-round(boot.m1_dwelltime_actionphase_target_lmer_lme4$ci.estimates, 3)
+res.m1_dwelltime_actionphase_target_lmer_lme4
+```
+
+##### Output table
+```{r}
+
+model_table_m1_dwelltime_actionphase_target_lmer_lme4<- bind_cols(as.data.frame(summary(m1_dwelltime_actionphase_target_lmer_lme4)$coefficients[,1:2]),
+                             summary(m1_dwelltime_actionphase_target_lmertest)$coefficients[,3:5],
+                             res.m1_dwelltime_actionphase_target_lmer_lme4,
+                             m1_dwelltime_actionphase_target_lmer_lme4_drop1)%>%
+  select(Estimate, SE = `Std. Error`, t =`t value`, df, p=`Pr(>|t|)`, LowerCI = X2.5., UpperCI = X97.5., Chi2 = LRT, df_LRT = npar, p_LRT = `Pr(Chi)`,) %>%  
+  mutate(across(.cols = c(p, p_LRT), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:t), ~ format(round(.x, 2), nsmall=2))) %>% 
+  mutate(across(.cols = c(LowerCI:Chi2), ~ format(round(.x, 2), nsmall=2))) 
+
+write.csv(model_table_m1_dwelltime_actionphase_target_lmer_lme4, file = "saves/mm1_actionphase_target_dwelltime_zscores_lmer_output_table.csv")
+```
+
+
+
+
+
+
+
+### Dwell time to actor
+
+```{r}
+actionphase_actor_data <- xdata%>%
+  filter(!is.na(condition), IP_LABEL=="first_video", actor_IA== "actor")%>%
+  anti_join(filter_data_actionphase)%>%
+  mutate(trial = as.numeric(ifelse(trial_overall>3 & trial_overall<7, trial_overall-3,
+                        ifelse(trial_overall>6 & trial_overall<10, trial_overall-6,                               ifelse(trial_overall>9, trial_overall-9,trial_overall)))))
+
+actionphase_actor_data_agg <- actionphase_actor_data %>%
+  group_by(subject) %>%
+  summarise(mean_individual_dwell_time = mean(IA_DWELL_TIME, na.rm=TRUE),
+            sd_individual_dwell_time = sd(IA_DWELL_TIME, na.rm=TRUE))
+
+actionphase_actor_data <- actionphase_actor_data %>%
+  full_join(actionphase_actor_data_agg)%>%
+  mutate(dwell_time_z = (IA_DWELL_TIME-mean_individual_dwell_time)/sd_individual_dwell_time)
+
+actionphase_actor_data$z.trial2<-as.vector(scale(actionphase_actor_data$trial_overall, center = TRUE, scale=TRUE))
+actionphase_actor_data$condition.c <- as.vector(scale(as.numeric(as.factor(actionphase_actor_data$condition)), center = TRUE, scale = FALSE))
+actionphase_actor_data$position.c <- as.vector(scale(as.numeric(as.factor(actionphase_actor_data$position)), center = TRUE, scale = FALSE))
+
+```
+
+
+
+
+```{r}
+library(lme4)
+m1_dwelltime_actionphase_actor_lmer_lme4 = lme4::lmer(
+  dwell_time_z ~ condition + position + z.trial2 +
+    (1 + position+ z.trial2 + condition.c|| subject), 
+  data = actionphase_actor_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+drop1(m1_dwelltime_actionphase_actor_lmer_lme4, test = "Chisq")
+m1_dwelltime_actionphase_actor_lmer_lme4_null = lme4::lmer(
+  dwell_time_z ~ 1+
+    (1 + position+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = actionphase_actor_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+anova(m1_dwelltime_actionphase_actor_lmer_lme4, m1_dwelltime_actionphase_actor_lmer_lme4_null, test="Chisq")
+```
+
+
+Assumptions and stability
+```{r}
+diagnostics.plot(m1_dwelltime_actionphase_actor_lmer_lme4)
+ranef.diagn.plot(m1_dwelltime_actionphase_actor_lmer_lme4)
+```
+LRT
+```{r}
+m1_dwelltime_actionphase_actor_lmer_lme4_drop1 <- drop1(m1_dwelltime_actionphase_actor_lmer_lme4, test="Chisq")
+m1_dwelltime_actionphase_actor_lmer_lme4_drop1
+m1_dwelltime_actionphase_actor_lmer_lme4_drop1<- m1_dwelltime_actionphase_actor_lmer_lme4_drop1%>% 
+  filter(!is.na(npar)) %>% 
+  add_row(npar = rep(NA,1),  .before = 1) 
+```
+
+```{r}
+library(lmerTest)
+m1_dwelltime_actionphase_actor_lmertest = lmerTest::lmer(
+  dwell_time_z ~ condition+position+ z.trial2 +
+    (1 + position+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = actionphase_actor_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_actionphase_actor_lmertest)
+diagnostics.plot(m1_dwelltime_actionphase_actor_lmertest)
+```
+
+ + confidence intervals
+
+```{r}
+boot.m1_dwelltime_actionphase_actor_lmer_lme4=boot.lmer(model.res=m1_dwelltime_actionphase_actor_lmer_lme4, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=1000, level=0.95)
+
+res.m1_dwelltime_actionphase_actor_lmer_lme4<-round(boot.m1_dwelltime_actionphase_actor_lmer_lme4$ci.estimates, 3)
+res.m1_dwelltime_actionphase_actor_lmer_lme4
+```
+
+##### Output table
+```{r}
+
+model_table_m1_dwelltime_actionphase_actor_lmer_lme4<- bind_cols(as.data.frame(summary(m1_dwelltime_actionphase_actor_lmer_lme4)$coefficients[,1:2]),
+                             summary(m1_dwelltime_actionphase_actor_lmertest)$coefficients[,3:5],
+                             res.m1_dwelltime_actionphase_actor_lmer_lme4,
+                             m1_dwelltime_actionphase_actor_lmer_lme4_drop1)%>%
+  select(Estimate, SE = `Std. Error`, t =`t value`, df, p=`Pr(>|t|)`, LowerCI = X2.5., UpperCI = X97.5., Chi2 = LRT, df_LRT = npar, p_LRT = `Pr(Chi)`,) %>%  
+  mutate(across(.cols = c(p, p_LRT), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:t), ~ format(round(.x, 2), nsmall=2))) %>% 
+  mutate(across(.cols = c(LowerCI:Chi2), ~ format(round(.x, 2), nsmall=2))) 
+
+
+write.csv(model_table_m1_dwelltime_actionphase_actor_lmer_lme4, file = "saves/mm1_actionphase_actor_dwelltime_zscores_lmer_output_table.csv")
+```
+
+# Plotting
+
+
+ + confidence intervals for plot
+
+```{r}
+m1_latency_z_outcome_lmer_lme4_plot = lme4::lmer(
+  latency_z ~ condition*outcome +object_pos_outcome.c+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+boot.m1_latency_z_outcome_lmer_lme4_plot=boot.lmer(model.res=m1_latency_z_outcome_lmer_lme4_plot, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=100, level=0.95, use = "condition")
+```
+
+
+```{r}
+m1_dwelltime_outcome_lmer_lme4_plot = lme4::lmer(
+  dwell_time_z ~ condition*outcome +object_pos_outcome.c+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+boot.m1_dwelltime_outcome_lmer_lme4_plot=boot.lmer(model.res=m1_dwelltime_outcome_lmer_lme4_plot, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=100, level=0.95, use = "condition")
+```
+
+
+```{r}
+
+boot.m1_dwelltime_outcome_lmer_lme4_plot$ci.fitted
+```
+```{r}
+boot.m1_latency_z_outcome_lmer_lme4_plot$ci.fitted
+```
+
+
+```{r}
+outcome_target_data_agg_plot_dwell <- outcome_target_data %>%
+  group_by(subject, condition, outcome) %>%
+  summarise(mean_dwell_z = mean(dwell_time_z, na.rm=TRUE))%>%
+  ungroup() %>%
+  full_join(boot.m1_dwelltime_outcome_lmer_lme4_plot$ci.fitted)
+
+outcome_target_data_agg_plot_latency <- outcome_target_data %>%
+  group_by(subject, condition, outcome) %>%
+  summarise(mean_latency_z = mean(latency_z, na.rm=TRUE))%>%
+  ungroup() %>%
+  full_join(boot.m1_latency_z_outcome_lmer_lme4_plot$ci.fitted)
+```
+
+```{r}
+
+library(gghalves)
+library(ggbeeswarm)
+library(ggsignif)
+```
+
+
+
+##### Latency plot
+
+```{r}
+
+latency_outcome_phase.plot <- ggplot(
+  data = outcome_target_data_agg_plot_latency %>% mutate(
+    outcome = dplyr::recode(
+      outcome,
+      NO = "No change",
+      IDENTITY = "Identity change",
+      LOCATION = "Location change"
+    ),
+    condition = dplyr::recode(
+      condition,
+      COM = "Eye-contact",
+      NCOM = "No eye-contact"
+    )
+  ),
+  aes(x = outcome, y = mean_latency_z, fill = condition)
+) +
+  #coord_flip() +
+  geom_boxplot(outlier.colour = "white") +
+  #geom_jitter(alpha=0.5, width = 0.1) +
+  theme_light() +
+  ylab("Latency (within-subject z scores)") + xlab("") +
+  geom_quasirandom(
+    size = 0.8,
+    alpha = 0.8,
+    color = "grey",
+    dodge.width = 0.8,
+    width = 0.1
+  ) +
+   geom_errorbar(
+        aes(ymin =  lower.cl, ymax =  upper.cl),
+    width = 0.2,
+    position = position_dodge(width = 0.8)
+  ) +
+    geom_point(
+        aes(y =  fitted),
+        position = position_dodge(width = 0.8)
+  )+
+ geom_signif(
+    annotations = "*",
+    y_position = 2.2,  # adjust this based on your data
+    xmin = 2 - 0.2,    # x position of "Eye-contact" bar (2 = "Identity change")
+    xmax = 2 + 0.2,    # x position of "No eye-contact" bar
+    tip_length = 0,
+    textsize = 5,
+    vjust = 0.5
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(0.85, 0.1),
+    legend.text = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    legend.background = element_rect(fill = 'transparent', color = NA)
+  ) +
+  scale_fill_manual(values = c("Eye-contact" = "dodgerblue", "No eye-contact" = "darkorange3")) 
+#ggtitle("Dwell time (outcome phase)")
+
+latency_outcome_phase.plot
+```
+
+```{r}
+ggsave(latency_outcome_phase.plot, filename = "graphics/latency_outcome_phase_plot.png", width=8, height=7, scale=0.8)
+
+```
+
+
+##### Z scores dwell time plot
+```{r}
+dwell_time_outcome_phase.plot_z <- ggplot(
+  data = outcome_target_data_agg_plot_dwell %>% mutate(
+    outcome = dplyr::recode(
+      outcome,
+      NO = "No change",
+      IDENTITY = "Identity change",
+      LOCATION = "Location change"
+    ),
+    condition = dplyr::recode(
+      condition,
+      COM = "Eye-contact",
+      NCOM = "No eye-contact"
+    )
+  ),
+  aes(x = outcome, y = mean_dwell_z, fill = condition)
+) +
+  #coord_flip() +
+  geom_boxplot(outlier.colour = "white") +
+  #geom_jitter(alpha=0.5, width = 0.1) +
+  theme_light() +
+  ylab("Dwell time (within-subject z scores)") + xlab("") +
+  geom_quasirandom(
+    size = 0.8,
+    alpha = 0.8,
+    color = "grey",
+    dodge.width = 0.8,
+    width = 0.1
+  ) +
+   geom_errorbar(
+        aes(ymin =  lower.cl, ymax =  upper.cl),
+    width = 0.2,
+    position = position_dodge(width = 0.8)
+  ) +
+    geom_point(
+        aes(y =  fitted),
+        position = position_dodge(width = 0.8)
+  )+
+ geom_signif(
+    annotations = "*",
+    y_position = 1.8,  # adjust this based on your data
+    xmin = 2 - 0.2,    # x position of "Eye-contact" bar (2 = "Identity change")
+    xmax = 2 + 0.2,    # x position of "No eye-contact" bar
+    tip_length = 0,
+    textsize = 5,
+    vjust = 0.5
+  )+
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(0.85, 0.1),
+    legend.text = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    legend.background = element_rect(fill = 'transparent', color = NA)
+  ) +
+  scale_fill_manual(values = c("Eye-contact" = "dodgerblue", "No eye-contact" = "darkorange3")) 
+#ggtitle("Dwell time (outcome phase)")
+
+dwell_time_outcome_phase.plot_z
+```
+
+```{r}
+ggsave(dwell_time_outcome_phase.plot_z, filename = "graphics/dwell_time_outcome_phase_plot_z_scores.png", width=8, height=7, scale=0.8)
+
+```
+
+```{r}
+library(cowplot)
+pg <- plot_grid(dwell_time_outcome_phase.plot_z, latency_outcome_phase.plot, nrow = 2, labels = c("A", "B"), rel_heights = c(1, 0.9))
+
+ggsave(pg, filename = "graphics/plot_grid_z_scores.png", width=8, height=12, scale=0.75)
+```
+
+
+```{r}
+save.image(file = "workspaces/dog_identity_change_AOIreport_analysis.RData")
+```

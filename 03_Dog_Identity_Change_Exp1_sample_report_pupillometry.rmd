@@ -1,0 +1,1116 @@
+---
+title: Dog Identity Change: Sample Report analysis - pupillometry
+author: Christoph Voelter
+date: 20/12/2024
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#rm(list = ls())
+library(tidyverse)
+library(lme4)
+library(naniar)
+library(gazer)
+library(zoo)
+library(arrow)
+library(readr)
+
+#GAMM
+library(itsadug)
+library(plotfunctions)
+#load(file = "workspaces/actionphase_gamm_workspace.RData")
+```
+
+### Notes:
+
+36 dogs started with the experiment but only 34 completed all test sessions. One additional dog (Floki) completed the first test session (included). Another dog (Raya) started with the pretest but became unavailable before the start of the test phase. 
+
+Saved with the IP relative setting in DataViewer.
+
+
+# Loading data
+```{r}
+# Set the directory path where the parquet files are saved
+parquet_dir <- "data/raw_data/"
+
+# List all parquet files in the directory
+parquet_files <- list.files(path = parquet_dir, pattern = "\\.parquet$", full.names = TRUE)
+
+# Read all parquet files and combine them into one dataframe
+sample.data <- parquet_files %>%
+  lapply(read_parquet) %>%
+  bind_rows()
+table(sample.data$subject, sample.data$trial_overall)
+table(sample.data$subject, sample.data$Trial_Index_)
+levels(as.factor(sample.data$test_phase))
+levels(as.factor(sample.data$IP_LABEL))
+levels(as.factor(sample.data$block))
+table(sample.data$subject, sample.data$block)
+#str(sample.data, list.len=ncol(df))
+```
+
+
+*IA report
+```{r}
+aoi_data <- read_delim("data/dog_identity_change_IA_report.txt", na=".", delim="\t")%>%
+  mutate(IA_LABEL = dplyr::recode(as.factor(IA_LABEL), upper_object="up", lower_object="down", actor_left="left", actor_right="right"))
+#checks
+table(aoi_data$IA_LABEL, aoi_data$IP_LABEL)
+levels(as.factor(aoi_data$test_phase))
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+length(levels(as.factor(aoi_data$subject_session)))
+
+aoi_data_filter <- aoi_data %>%
+  group_by(RECORDING_SESSION_LABEL, trial_overall)%>%
+  summarise(filter_variable = sum(IA_AVERAGE_FIX_PUPIL_SIZE, na.rm = TRUE))%>%
+  ungroup()%>%
+  mutate(filter_variable = ifelse(filter_variable == 0, NA, 1))
+
+aoi_data2 <- aoi_data %>%
+  inner_join(aoi_data_filter) %>%
+  filter(test_phase %in% c("FIRST-TEST")) %>% #retain only test trials
+  filter(filter_variable == 1) %>% # retain only trials in which the pupil was detected
+  filter(
+    !RECORDING_SESSION_LABEL %in% c("Hetti_3", "Melody_5", "Milo_3"),
+    !(RECORDING_SESSION_LABEL == "Joker_4" &
+        trial_overall == 8),
+    !(RECORDING_SESSION_LABEL == "Mathild2" &
+        trial_overall == 2),
+    !(RECORDING_SESSION_LABEL == "Melody_3" &
+        trial_overall == 9)
+  ) %>%  # remove trials in which they've left the chin rest or that were conducted twice due to an experimenter mistake (N=1)
+  filter(!is.na(subject), !is.na(trial_overall), !is.na(IP_LABEL))
+    
+#checks     
+table(aoi_data$RECORDING_SESSION_LABEL, aoi_data$trial_overall)
+table(aoi_data$subject)
+levels(as.factor(aoi_data$condition))
+
+#missing: Alaska_6 
+#to remove: Hetti_3, Joker_4 trial_overall 8, Mathild2 trial_overall == 2, Melody_3 trial_overall==9, Melody 5, Milo_3
+table(aoi_data2$condition, aoi_data2$subject, aoi_data2$trial_overall)
+table(aoi_data2$IA_LABEL, aoi_data2$IA_BOTTOM)
+```
+* demographic data
+
+```{r}
+demo.data <- read_csv("data/dog_identity_change_counterbalancing_exp1.csv")%>%
+  rename(subject = "Dog_ID")
+```
+## First subsetting and recoding of IA LABEL
+```{r}
+
+sample.data <-  sample.data%>%
+  filter(test_phase %in% c("FIRST-TEST")) %>% #retain only test trials
+  filter(
+    !RECORDING_SESSION_LABEL %in% c("Hetti_3", "Melody_5", "Milo_3"),
+    !(RECORDING_SESSION_LABEL == "Joker_4" &
+        trial_overall == 8),
+    !(RECORDING_SESSION_LABEL == "Mathild2" &
+        trial_overall == 2),
+    !(RECORDING_SESSION_LABEL == "Melody_3" &
+        trial_overall == 9)
+  ) %>% # remove trials in which they've left the chin rest or that were conducted twice due to an experimenter mistake (N=1)
+  full_join(demo.data) %>%
+  mutate(time.frame = TIMESTAMP - IP_START_TIME) %>%
+  mutate(RIGHT_INTEREST_AREA_LABEL = dplyr::recode(as.factor(RIGHT_INTEREST_AREA_LABEL), upper_object="up", lower_object="down", actor_left="left", actor_right="right"))%>%
+  mutate(target_object_IA = ifelse(IP_LABEL== "first_video" & RIGHT_INTEREST_AREA_LABEL==object_pos, "target",
+                                   ifelse(IP_LABEL== "outcome_video" & RIGHT_INTEREST_AREA_LABEL==object_pos_outcome, "target", NA)),
+         actor_IA = ifelse(RIGHT_INTEREST_AREA_LABEL==position, "actor", NA))
+
+table(sample.data$target_object_IA, sample.data$object_pos_outcome, sample.data$outcome)
+levels(as.factor(sample.data$test_phase))
+```
+### Inclusion criteria
+```{r}
+gaze.data_total <- sample.data %>%
+  group_by(
+    RECORDING_SESSION_LABEL,
+    subject,
+    condition,
+    outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    trial_overall,
+    trial_w_session,
+    IP_LABEL,
+    IP_DURATION
+  ) %>%
+  summarise(
+    n_samples = length(RIGHT_GAZE_X),
+    onscreen_looking = sum(
+      RIGHT_GAZE_X > 0 & RIGHT_GAZE_X < 1920 &
+        RIGHT_GAZE_Y > 0 & RIGHT_GAZE_Y < 1080,
+      na.rm = TRUE                                    # Ignore NA values
+    )
+  )%>%
+  filter(onscreen_looking>0)
+
+table(gaze.data_total$condition, gaze.data_total$subject, gaze.data_total$trial_overall)
+
+
+gaze.data <- sample.data %>%
+  filter(!is.na(RIGHT_INTEREST_AREA_LABEL)) %>%
+  group_by(
+    RECORDING_SESSION_LABEL,
+    subject,
+    condition,
+    outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    trial_overall,
+    trial_w_session,
+    IP_LABEL,
+    RIGHT_INTEREST_AREA_LABEL
+  ) %>%
+  summarise(IA_looking_time = length(RIGHT_INTEREST_AREA_LABEL),
+            IA_first_visit_time = min(time.frame, na.rm=TRUE)) %>%
+  filter(!is.na(IP_LABEL))
+
+table(gaze.data$condition, gaze.data$subject, gaze.data$trial_overall)
+hist(gaze.data$IA_first_visit_time)
+min(gaze.data$IA_first_visit_time)
+```
+
+```{r}
+all_combinations <- expand.grid(
+  subject = unique(gaze.data$subject),
+  RIGHT_INTEREST_AREA_LABEL = unique(sample.data$RIGHT_INTEREST_AREA_LABEL),
+  trial_overall = unique(gaze.data$trial_overall),
+  IP_LABEL = unique(gaze.data$IP_LABEL)
+) %>%
+  filter(!is.na(subject), !is.na(trial_overall), !is.na(IP_LABEL), !is.na(RIGHT_INTEREST_AREA_LABEL))%>%
+  right_join(aoi_data2 %>% dplyr::select(RECORDING_SESSION_LABEL, subject,RIGHT_INTEREST_AREA_LABEL=IA_LABEL, trial_overall, trial_w_session, IP_LABEL,  outcome, condition, object_pos, object_pos_outcome, position ))
+
+table(all_combinations$subject, all_combinations$trial_overall)
+
+
+
+
+gaze.data2 <- gaze.data %>%
+  full_join(all_combinations) %>%
+  full_join(gaze.data_total) %>%
+  mutate(IA_looking_time = as.numeric(ifelse(
+    is.na(IA_looking_time), 0, IA_looking_time
+  )),
+  IA_looking_time_prop = IA_looking_time / IP_DURATION,
+  target_object_IA = ifelse(
+    IP_LABEL == "first_video" &
+      RIGHT_INTEREST_AREA_LABEL == object_pos,
+    "target",
+    ifelse(
+      IP_LABEL == "outcome_video" &
+        RIGHT_INTEREST_AREA_LABEL == object_pos_outcome,
+      "target",
+      NA
+    )
+  ), actor_IA = ifelse(RIGHT_INTEREST_AREA_LABEL == position, "actor", NA)
+)  %>%
+  filter(!is.na(IP_LABEL))
+```
+
+
+```{r}
+table(gaze.data2$condition, gaze.data2$subject, gaze.data2$trial_overall)
+levels(as.factor(gaze.data2$RIGHT_INTEREST_AREA_LABEL))
+levels(as.factor(gaze.data2$IP_LABEL))
+levels(as.factor(gaze.data2$actor_IA))
+hist(gaze.data2$IA_looking_time)
+```
+
+## First video (action phase) analysis
+
+
+```{r}
+gaze_detected_per_action <- gaze.data2%>%
+  filter(!is.na(condition)) %>%#, target_object_IA== "target"
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL) %>%
+  summarise(IP_look_prop = onscreen_looking/IP_DURATION) %>%
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL) %>%
+  summarise(IP_look_prop = mean(IP_look_prop))%>%
+  ungroup()%>%
+  filter(IP_look_prop<0.7)
+
+gaze_detected_per_action %>% group_by(IP_LABEL) %>% summarise(length(IP_look_prop))
+#18 trials (first video) and 56 trials (outcome video) should be removed because the dogs did not look at the first video sufficiently
+
+filter_data_actionphase <- gaze_detected_per_action %>%
+  dplyr::select(-IP_look_prop, -IP_LABEL)
+
+gaze_detected_per_action_firstvideo <- gaze_detected_per_action%>%
+  filter(IP_LABEL == "first_video")
+
+sample.data <- sample.data%>%
+  filter(!is.na(condition), IP_LABEL == "first_video") %>%
+  anti_join(gaze_detected_per_action_firstvideo)
+```
+
+
+
+
+# Loading video parameters
+```{r}
+## time.frame for interpolation
+sample.data%>% group_by(subject, trial_overall, IP_LABEL) %>% summarise(max(time.frame))
+max.time <- 16000
+min.time <- 0
+time.frame <- seq(from = min.time, to = max.time, by = 1)
+xx <- as.data.frame(time.frame)
+baseline.start<-2000
+baseline.end<-2999
+start_ip <- 3000
+
+```
+
+
+```{r}
+levels(as.factor(sample.data$condition))
+table(sample.data$condition, sample.data$trial_overall, sample.data$subject)
+length(unique(sample.data$subject))
+length(unique(demo.data$subject))
+
+setdiff(unique(demo.data$subject), unique(sample.data$subject))
+diff_sample_demo<-setdiff(unique(sample.data$subject), unique(demo.data$subject))
+
+intersect(unique(sample.data$subject), unique(demo.data$subject))
+
+unique_values <- union(setdiff(unique(demo.data$subject), unique(sample.data$Session_Name_)), setdiff(unique(sample.data$Session_Name_), unique(demo.data$subject)))
+unique_values
+```
+
+# Pupil size
+
+## Artefact check
+*Plot raw data
+
+```{r}
+# Get unique combinations of video_file and block
+unique_combinations <- expand.grid(trial_label = unique(sample.data$trial_overall))
+
+# Loop through each combination of video_file and block
+for (i in 1:nrow(unique_combinations)) {
+  trial_ <- unique_combinations$trial_label[i]
+  
+  # Filter data for the current video and block
+  plot_data <- sample.data %>% filter(trial_overall == trial_, !is.na(subject), RIGHT_PUPIL_SIZE>0)
+  
+  # Create the plot for the current combination of video and block
+  raw_data_plot <- ggplot(data = plot_data, aes(x = time.frame, y = RIGHT_PUPIL_SIZE, color = condition, fill =condition)) +
+    ylab("Pupil size") +
+    xlab("Time (in ms)") +
+    geom_point(alpha = 0.5, size = 0.5) +
+    facet_wrap(~ subject, ncol = 8, nrow = 5) +   # 8 columns, 5 rows
+    theme_bw() +
+   scale_color_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue"))  +
+    scale_fill_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue")) +
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.title = element_blank(), 
+          legend.position = "top", 
+          legend.text = element_text(size = 12))
+  
+  # Save the plot with video and block information in the filename
+  ggsave(filename = paste0("graphics/raw_pupil/", "Dog_IDChange_trial_", trial_, "_pupil_raw.png"), plot = raw_data_plot, width = 18, height = 12)
+}
+
+
+```
+
+
+
+### Artefact correction
+```{r}
+sample.data <- sample.data %>%
+  group_by(RECORDING_SESSION_LABEL, subject, IP_LABEL, condition, block, TRIAL_INDEX, trial_overall, trial_w_session, video_file_cue, video_file_outcome, object, object_outcome, position, object_pos, object_pos_outcome, actor) %>%
+  mutate(
+    RIGHT_PUPIL_SIZE_no_blinks =
+      extend_blinks(
+        RIGHT_PUPIL_SIZE,
+        hz = 1000,
+        fillback = 100,
+        fillforward = 100
+      ),
+    RIGHT_GAZE_X_no_blinks = extend_blinks(
+      RIGHT_GAZE_X,
+      hz = 1000,
+      fillback = 100,
+      fillforward = 100
+    ),
+    RIGHT_GAZE_Y_no_blinks = extend_blinks(
+      RIGHT_GAZE_Y,
+      hz = 1000,
+      fillback = 100,
+      fillforward = 100
+    ),
+    RIGHT_pupil.inter = na.approx(
+      RIGHT_PUPIL_SIZE_no_blinks,
+      na.rm = FALSE,
+      maxgap = 500
+    ),
+    speed_right_pupil = speed_pupil(RIGHT_pupil.inter, time.frame),
+    MAD_right_pupil = calc_mad(speed_right_pupil, n = 8),
+    RIGHT_pupil.noArtefact = as.numeric(
+      ifelse(speed_right_pupil < MAD_right_pupil, RIGHT_pupil.inter, NA)
+    ),
+    RIGHT_pupil.inter2 = na.approx(RIGHT_pupil.noArtefact,
+                                   na.rm = FALSE,
+                                   maxgap = 500)
+  )
+
+
+sum(is.na(sample.data$RIGHT_PUPIL_SIZE_no_blinks))
+
+
+write_parquet(sample.data, "data/dog_object_change_MAD8_actionphase_samplereport.parquet")
+
+
+min(sample.data$RIGHT_pupil.noArtefact, na.rm=TRUE)
+max(sample.data$RIGHT_pupil.noArtefact, na.rm=TRUE)
+```
+
+The preprocessing steps conducted in this study aimed to enhance the quality of pupillometry data. Initially, blink artifacts were removed by extending the detected blinks by 100 ms. Subsequently, the speed of pupil diameter changes over time was calculated . Median speed values were then computed for each recording session to serve as a baseline for identifying outliers. Outliers were detected based on the median absolute deviation (MAD) method, with a threshold set at eight times the MAD. Additionally, based on visual inspection of the data we excluded values with leading or lagging NA values within a window of the next 15 entries. Finally, missing values were interpolated using a spline method to ensure the continuity of the pupil size data. Overall, these preprocessing steps aimed to mitigate artifacts and enhance the reliability of the pupillometry dataset for subsequent analyses.
+
+* Plotting of artefact checks
+
+
+```{r}
+# Get unique combinations of video_file and block
+unique_combinations <- expand.grid(trial_label = unique(sample.data$trial_overall))
+
+# Loop through each combination of video_file and block
+for (i in 1:nrow(unique_combinations)) {
+  trial_ <- unique_combinations$trial_label[i]
+  
+  # Filter data for the current video and block
+  plot_data <- sample.data %>% filter(trial_overall == trial_, !is.na(subject), RIGHT_pupil.inter2>0)
+  
+  # Create the plot for the current combination of video and block
+  raw_data_plot <- ggplot(data = plot_data, aes(x = time.frame, y = RIGHT_pupil.inter2, color = condition, fill =condition)) +
+    ylab("Pupil size") +
+    xlab("Time (in ms)") +
+    geom_point(alpha = 0.5, size = 0.5) +
+    facet_wrap(~ subject, ncol = 8, nrow = 5) +   # 8 columns, 5 rows
+    theme_bw() +
+   scale_color_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue"))  +
+    scale_fill_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue")) +
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.title = element_blank(), 
+          legend.position = "top", 
+          legend.text = element_text(size = 12))
+  
+  # Save the plot with video and block information in the filename
+  ggsave(filename = paste0("graphics/1_blink_correction_interpolation/", "Dog_IDChange_trial_", trial_, "_pupil_artefactcorrect_inter.png"), plot = raw_data_plot, width = 18, height = 12)
+}
+
+```
+
+```{r}
+sample.data<-read_parquet("data/dog_object_change_MAD8_actionphase_samplereport.parquet")
+```
+#### Baseline correction
+```{r}
+# baseline
+data.pupil.base <- sample.data %>%
+  filter(time.frame < baseline.end &
+           time.frame >= baseline.start) %>%
+  group_by(RECORDING_SESSION_LABEL, subject, IP_LABEL, condition, block, TRIAL_INDEX, trial_overall, trial_w_session, video_file_cue, video_file_outcome, object, object_outcome, position, object_pos, object_pos_outcome, actor) %>%
+  summarise(
+    median.base.pupil.right = median(RIGHT_pupil.inter2, na.rm = TRUE)
+  )
+```
+
+```{r}
+data.pupil.basecorrected <- sample.data %>%
+  filter(time.frame > start_ip) %>%
+  select(
+    RECORDING_SESSION_LABEL,
+    subject,
+    IP_LABEL,
+    condition,
+    block,
+    TRIAL_INDEX,
+    trial_overall,
+    trial_w_session,
+    video_file_cue,
+    video_file_outcome,
+    object,
+    object_outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    actor,
+    time.frame,
+    RIGHT_pupil.inter2,
+    RIGHT_PUPIL_SIZE,
+    RIGHT_GAZE_X,
+    RIGHT_GAZE_Y,
+    RIGHT_GAZE_X_no_blinks,
+    RIGHT_GAZE_Y_no_blinks
+  ) %>%
+  group_by(
+    RECORDING_SESSION_LABEL,
+    subject,
+    IP_LABEL,
+    condition,
+    block,
+    TRIAL_INDEX,
+    trial_overall,
+    trial_w_session,
+    video_file_cue,
+    video_file_outcome,
+    object,
+    object_outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    actor
+  ) %>%
+  full_join(data.pupil.base) %>% #add baseline data
+  mutate(RIGHT.pupil.base.corrected = as.numeric(
+    ifelse(
+      !is.na(RIGHT_pupil.inter2),
+      RIGHT_pupil.inter2 - median.base.pupil.right,
+      NA
+    )
+  )) %>% #subtractive baseline correction
+  ungroup()
+```
+*right pupil
+```{r eval=FALSE}
+puphist_r <- ggplot(data.pupil.basecorrected, aes(x = RIGHT.pupil.base.corrected)) + geom_histogram(aes(y = ..count..), 
+    colour = "green", binwidth = 0.5)  + 
+    xlab("RIGHT Pupil Size") + ylab("Count") + theme_bw()
+puphist_r
+```
+
+
+* Plotting of baseline corrected  data
+
+
+```{r}
+# Get unique combinations of video_file and block
+unique_combinations <- expand.grid(trial_label = unique(data.pupil.basecorrected$trial_overall))
+
+# Loop through each combination of video_file and block
+for (i in 1:nrow(unique_combinations)) {
+  trial_ <- unique_combinations$trial_label[i]
+  
+  # Filter data for the current video and block
+  plot_data <- data.pupil.basecorrected %>% filter(trial_overall == trial_, !is.na(subject), !is.na(RIGHT_pupil.inter2))
+  
+  # Create the plot for the current combination of video and block
+  raw_data_plot <- ggplot(data = plot_data, aes(x = time.frame, y = RIGHT.pupil.base.corrected, color = condition, fill =condition)) +
+    ylab("Pupil size") +
+    xlab("Time (in ms)") +
+    geom_point(alpha = 0.5, size = 0.5) +
+    facet_wrap(~ subject, ncol = 8, nrow = 5) +   # 8 columns, 5 rows
+    theme_bw() +
+   scale_color_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue"))  +
+    scale_fill_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue")) +
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.title = element_blank(), 
+          legend.position = "top", 
+          legend.text = element_text(size = 12))
+  
+  # Save the plot with video and block information in the filename
+  ggsave(filename = paste0("graphics/2_baseline_correction/", "Dog_IDChange_trial_", trial_, "_pupil_baselinecorrection.png"), plot = raw_data_plot, width = 18, height = 12)
+}
+  
+```
+
+
+#### Downsampling
+```{r}
+sum(!is.na(data.pupil.basecorrected$time.frame))
+data.pupil.basecorrected <- data.pupil.basecorrected %>%
+  mutate(bin = cut(time.frame, seq(min(time.frame, na.rm = TRUE), max(time.frame, na.rm = TRUE), 100), right = FALSE)) %>% #addition of time bins (100 ms = 10 hz)
+  separate(bin,
+           c("bin_low", "bin_high"),
+           sep = ",",
+           remove = FALSE) %>%
+  select(-bin_high, -bin) %>%
+  mutate(bin_low = as.numeric(str_replace_all(bin_low, "\\[|\\]", "")))
+
+data.pupil.basecorrected.downsampled <-
+  data.pupil.basecorrected %>%
+  group_by(RECORDING_SESSION_LABEL,
+    subject,
+    IP_LABEL,
+    condition,
+    block,
+    TRIAL_INDEX,
+    trial_overall,
+    trial_w_session,
+    video_file_cue,
+    video_file_outcome,
+    object,
+    object_outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    actor,
+    bin_low) %>%
+  summarise(
+    RIGHT.pupil.base.corrected = median(RIGHT.pupil.base.corrected, , na.rm = TRUE),
+    Xgaze_RIGHT = median(RIGHT_GAZE_X_no_blinks, na.rm = TRUE),
+    Ygaze_RIGHT = median(RIGHT_GAZE_Y_no_blinks, na.rm = TRUE)
+  )
+
+str(data.pupil.basecorrected.downsampled)
+```
+
+
+
+```{r}
+
+unique_combinations <- expand.grid(trial_label = unique(data.pupil.basecorrected.downsampled$trial_overall))
+
+# Loop through each trial
+for (i in 1:nrow(unique_combinations)) {
+  trial_ <- unique_combinations$trial_label[i]
+  
+  # Filter data for the current trial
+  plot_data <- data.pupil.basecorrected.downsampled %>% filter(trial_overall == trial_, !is.na(subject), !is.na(RIGHT.pupil.base.corrected))
+  
+  # Create the plot for the current combination of video and block
+  raw_data_plot <- ggplot(data = plot_data, aes(x = bin_low, y = RIGHT.pupil.base.corrected, color = condition, fill =condition)) +
+    ylab("Pupil size (baseline corrected)") +
+    xlab("Time (in ms)") +
+    geom_point(alpha = 1, size = 1) +
+    facet_wrap(~ subject, ncol = 8, nrow = 5) +   # 8 columns, 5 rows
+    theme_bw() +
+   scale_color_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue"))  +
+    scale_fill_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue")) +
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.title = element_blank(), 
+          legend.position = "top", 
+          legend.text = element_text(size = 12))
+  
+  # Save the plot with video and block information in the filename
+  ggsave(filename = paste0("graphics/3_downsampling/", "Dog_IDChange_trial_", trial_, "_pupil_downsampled_BC_AC.png"), plot = raw_data_plot, width = 18, height = 12)
+}
+
+```
+
+
+#### Additional filter based on speed with downsampled data
+```{r}
+data.pupil.basecorrected.downsampled <-
+  data.pupil.basecorrected.downsampled %>%
+  mutate(
+    speed_right_pupil = speed_pupil(RIGHT.pupil.base.corrected, bin_low),
+    MAD_right_pupil = calc_mad(speed_right_pupil, n = 8),
+    RIGHT_pupil.ds.noArtefact = as.numeric(
+      ifelse(
+        speed_right_pupil < MAD_right_pupil,
+        RIGHT.pupil.base.corrected,
+        NA
+      )
+    ),
+    RIGHT_pupil.ds.inter = na.approx(
+      RIGHT_pupil.ds.noArtefact,
+      na.rm = FALSE,
+      maxgap = 300, rule = 1
+    )
+  )
+
+```
+
+
+
+
+```{r}
+# Get unique combinations of trial
+unique_combinations <- expand.grid(trial_label = unique(data.pupil.basecorrected.downsampled$trial_overall))
+
+# Loop through each trial
+for (i in 1:nrow(unique_combinations)) {
+  trial_ <- unique_combinations$trial_label[i]
+  
+  # Filter data for the current trial
+  plot_data <- data.pupil.basecorrected.downsampled %>% filter(trial_overall == trial_, !is.na(subject), !is.na(RIGHT.pupil.base.corrected))
+  
+  # Create the plot for the current trial
+  raw_data_plot <- ggplot(data = plot_data, aes(x = bin_low, y = RIGHT_pupil.ds.inter, color = condition, fill =condition)) +
+    ylab("Pupil size (baseline corrected)") +
+    xlab("Time (in ms)") +
+    geom_point(alpha = 1, size = 1) +
+    facet_wrap(~ subject, ncol = 8, nrow = 5) +   # 8 columns, 5 rows
+    theme_bw() +
+   scale_color_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue"))  +
+    scale_fill_manual( values=c("COM"="darkorange", "NCOM"="dodgerblue")) +
+    theme(panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.title = element_blank(), 
+          legend.position = "top", 
+          legend.text = element_text(size = 12))
+  
+  # Save the plot with video and block information in the filename
+  ggsave(filename = paste0("graphics/4_additional_AC_correction/", "Dog_IDChange_trial_", trial_, "_pupil_downsampled_BC_AC2.png"), plot = raw_data_plot, width = 18, height = 12)
+}
+
+
+```
+
+
+
+### Group level plot
+*Quantify missing data
+```{r}
+data.pupil.basecorrected.downsampled_missingdata <- data.pupil.basecorrected.downsampled %>%
+  group_by(RECORDING_SESSION_LABEL,
+    subject,
+    IP_LABEL,
+    condition,
+    block,
+    TRIAL_INDEX,
+    trial_overall,
+    trial_w_session,
+    video_file_cue,
+    video_file_outcome,
+    object,
+    object_outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    actor) %>%
+  summarise(RIGHT_pupil.ds.noArtefact_NA = sum(is.na(RIGHT_pupil.ds.noArtefact)),
+            RIGHT_pupil.ds.noArtefact_count = length(RIGHT_pupil.ds.noArtefact))  %>%
+  filter(RIGHT_pupil.ds.noArtefact_NA == RIGHT_pupil.ds.noArtefact_count)%>%
+  dplyr::select(-RIGHT_pupil.ds.noArtefact_NA, -RIGHT_pupil.ds.noArtefact_count)
+
+
+table(data.pupil.basecorrected.downsampled_missingdata$subject, data.pupil.basecorrected.downsampled_missingdata$trial_overall)
+
+data.pupil.basecorrected.downsampled2 <- data.pupil.basecorrected.downsampled %>% anti_join(data.pupil.basecorrected.downsampled_missingdata)
+
+table(data.pupil.basecorrected.downsampled2$subject, data.pupil.basecorrected.downsampled2$trial_overall)
+levels(as.factor(data.pupil.basecorrected.downsampled2$video_file_cue))
+```
+
+
+```{r}
+write_parquet(data.pupil.basecorrected.downsampled2,  "data/dog_object_change_downsampled_actionphase_samplereport.parquet")
+```
+
+*Aggregate data
+```{r}
+data.pupil.basecorrected.downsampled2 <- read_parquet("data/dog_object_change_downsampled_actionphase_samplereport.parquet")
+
+
+start_ip = 3000
+interest_period_duration = 4000
+```
+
+* Plot group level data
+```{r}
+pupil.group.level <- data.pupil.basecorrected.downsampled2 %>%
+  filter(!is.na(subject)) %>%
+  group_by(bin_low, condition) %>%
+  summarise(
+    mean.pupil.corrected.binned.right = mean(RIGHT_pupil.ds.inter, na.rm = TRUE),
+    sd.pupil.corrected.binned.right = sd(RIGHT_pupil.ds.inter, na.rm = TRUE),
+    se.pupil.corrected.binned.right = sd(RIGHT_pupil.ds.inter, na.rm = TRUE) / sqrt(length(RIGHT_pupil.ds.inter))
+  )%>%
+  ungroup()
+
+```
+
+
+```{r}
+
+plot_pupil_group <- ggplot(data = pupil.group.level, aes(x = bin_low, y = mean.pupil.corrected.binned.right)) +
+  ylab("Pupil size") +
+  xlab("Time (in ms)") +
+  geom_path(
+    aes(
+      x = bin_low,
+      y = mean.pupil.corrected.binned.right,
+      color = as.factor(condition)
+    ),
+    alpha = 0.3,
+    size = 0.5
+  ) +
+  geom_ribbon(
+    aes(
+      ymin = mean.pupil.corrected.binned.right - se.pupil.corrected.binned.right,
+      ymax = mean.pupil.corrected.binned.right + se.pupil.corrected.binned.right,
+      fill = as.factor(condition)
+    ),
+    alpha = 0.3
+  ) +
+  geom_vline(aes(xintercept = start_ip), lty = 3) +
+  # geom_vline(aes(xintercept = start_ip + interest_period_duration), lty = 2) +
+  theme_bw() +
+  scale_color_manual(
+    values = c(NCOM = "darkorange", COM = "dodgerblue"),
+    labels = c(NCOM = "No eye-contact", COM = "Eye-contact")
+  ) +
+  scale_fill_manual(
+    values = c(NCOM = "darkorange", COM = "dodgerblue"),
+    labels = c(NCOM = "No eye-contact", COM = "Eye-contact")
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.title = element_blank(),
+    legend.position = c(0.85, 0.1),
+    legend.text = element_text(size = 12),
+    legend.key = element_blank(),
+    legend.background = element_rect(fill = "transparent")
+  ) +
+  xlim(3000, 7000) +
+  ylim(-250, 100)
+
+
+plot_pupil_group
+
+ggsave(plot_pupil_group, filename = "graphics/Dog_IDChange_pupile_group_level_plot_actionphase.png", height = 5, width = 10, scale = 0.7)
+```
+
+
+
+### GAMM
+
+
+* Plot gaze positions
+```{r}
+emptyPlot(c(0,1920), c(1080, 0), bty='o',
+          main="Gaze positions", xlab="Xgaze_RIGHT", ylab="Ygaze_RIGHT")
+points(data.pupil.basecorrected.downsampled2$Xgaze_RIGHT, data.pupil.basecorrected.downsampled2$Ygaze_RIGHT, pch=16, cex=.5, col=alpha(1), xpd=TRUE)
+abline(h=1080/2, v=1920/2, lty=1, col='white')
+abline(h=1080/2, v=1920/2, lty=2, col=1)
+```
+
+
+#### data preparation for GAMM
+
+* select interest period
+```{r}
+dat <- dat <- read_parquet("data/dog_object_change_downsampled_actionphase_samplereport.parquet")%>%
+  filter(bin_low>=3000 & bin_low<=7000) %>%
+  rename(time="bin_low", pupil_size_preprocessed = "RIGHT_pupil.ds.inter", Xgaze = "Xgaze_RIGHT", Ygaze = "Ygaze_RIGHT")%>%
+  arrange(subject, condition, trial_overall, time)%>%#order dataframe
+  droplevels()
+
+dat$condition<-as.factor(dat$condition)
+dat$subject<-as.factor(dat$subject)
+```
+
+
+* Plot individiual variability in pupil size
+
+```{r}
+pupil_size_boxplot<-ggplot(dat)+
+  geom_boxplot(aes(x= reorder(subject, pupil_size_preprocessed, FUN = median), y=pupil_size_preprocessed))+
+  ylab("Pupil size (arbitrary units)")+
+  xlab("")+
+  theme_classic()+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+pupil_size_gaze_position_plot<-ggplot(dat)+
+  geom_point(aes(x= Xgaze, y=Ygaze, color=pupil_size_preprocessed), alpha=0.15)+
+  ylab("Y coordinates")+
+  xlab("X coordinates")+
+  theme_bw()+
+  xlim(0,1920)+
+  ylim(1080, 0)+
+  scale_colour_gradient(name= "Pupil size", low = "yellow", high = "darkblue")
+library(cowplot)
+pg_s1<-plot_grid(pupil_size_boxplot, pupil_size_gaze_position_plot, rel_widths=c(1, 1.2), labels=c("A", "B"))
+
+
+ggsave(pg_s1,file="graphics/pupil_size_sup_info.png", width=15, height=5, scale=0.7)
+
+```
+
+
+
+* fit GAMM
+
+```{r}
+# Defining events (time series):
+dat$Event <- interaction(dat$subject, dat$condition, dat$trial_overall, drop=TRUE)
+
+gamm01 <- bam(pupil_size_preprocessed ~ condition + s(time, by=condition, k=20) 
+          + s(Xgaze, Ygaze)
+          + s(time, Event, bs='fs', m=1)  + s(time, subject, bs='fs', m=1) 
+          , data=dat, nthreads=40, method="ML")
+
+gamm01.null <- bam(pupil_size_preprocessed ~ s(time, k=20)+ 
+          + s(Xgaze, Ygaze)
+          + s(time, Event, bs='fs', m=1) + s(time, subject, bs='fs', m=1)
+          , data=dat, nthreads=40, method="ML")
+```
+
+
+```{r}
+summary_g1<-summary(gamm01)
+summary_g1
+
+sink("saves/action_phase_gamm01.txt")
+print(summary_g1)
+sink() 
+```
+
+
+```{r}
+gam.check(gamm01)
+acf(resid(gamm01), bty='n', main="ACF residuals model1")
+acf(resid(gamm01), plot=FALSE)
+
+compareML(gamm01, gamm01.null)
+AIC(gamm01, gamm01.null)
+
+```
+#### Saving summary
+```{r}
+# Base R approach using summary
+param <- summary_g1$p.table
+
+# Convert to data frame
+param_df <- as.data.frame(param)
+param_df$Term <- rownames(param_df)
+rownames(param_df) <- NULL
+
+# Reorder columns and clean
+param_df <- param_df[, c("Term", "Estimate", "Std. Error", "t value", "Pr(>|t|)")]
+colnames(param_df) <- c("Term", "Estimate", "SE", "t", "p")
+
+# Formatting
+param_df$Estimate <- round(param_df$Estimate, 2)
+param_df$SE <- round(param_df$SE, 2)
+param_df$t <- round(param_df$t, 2)
+param_df$p <- ifelse(param_df$p < 0.001, "<0.001", round(param_df$p, 3))
+
+# Use summary()$s.table for smooth terms
+smooth <- summary_g1$s.table
+
+# Convert to data frame
+smooth_df <- as.data.frame(smooth)
+smooth_df$`Smooth Term` <- rownames(smooth_df)
+rownames(smooth_df) <- NULL
+
+# Reorder columns
+smooth_df <- smooth_df[, c("Smooth Term", "edf", "Ref.df", "F", "p-value")]
+colnames(smooth_df) <- c("Smooth Term", "edf", "Ref.df", "F", "p")
+
+# Formatting
+smooth_df$edf <- round(smooth_df$edf, 2)
+smooth_df$Ref.df <- round(smooth_df$Ref.df, 2)
+smooth_df$F <- round(smooth_df$F, 2)
+smooth_df$p <- ifelse(smooth_df$p < 0.001, "<0.001", round(smooth_df$p, 3))
+
+```
+
+```{r}
+library(flextable)
+library(officer)
+
+# Create flextables
+param_ft <- flextable(param_df)
+param_ft <- set_caption(param_ft, "Parametric coefficients")
+param_ft <- width(param_ft, j = "Term", width = 2.5) 
+
+smooth_ft <- flextable(smooth_df)
+smooth_ft <- set_caption(smooth_ft, "Smooth terms")
+smooth_ft <- width(smooth_ft, j = "Smooth Term", width = 2.5)
+
+# Create and save Word document
+doc <- read_docx()
+doc <- body_add_par(doc, "Table S1. Results of GAMM 01", style = "heading 1")
+doc <- body_add_flextable(doc, param_ft)
+doc <- body_add_par(doc, "")
+doc <- body_add_flextable(doc, smooth_ft)
+doc <- body_add_par(doc, "Notes: Reference category of condition: Eye-contact", style = "Normal")
+
+print(doc, target = "saves/Table_S1_GAMM01.docx")
+
+```
+
+
+
+```{r}
+save.image(file = "workspaces/actionphase_gamm_workspace.RData")
+```
+* difference curve
+```{r}
+plot_diff(gamm01, view="time", 
+          comp=list(condition=c("COM", "NCOM")), rm.ranef=TRUE, main="Eye-contact - No eye-contact", 
+          las=1, ylab="Est. difference in pupil size", 
+            col="red", hide.label = TRUE, plot = TRUE)
+
+plot_diff_gamm01<-plot_diff(gamm01, view="time", 
+          comp=list(condition=c("COM", "NCOM")), rm.ranef=TRUE, main="Eye-contact - No eye-contact", 
+          las=1, ylab="Est. difference in pupil size", 
+            col="red", hide.label = TRUE, plot = FALSE)
+
+x <- find_difference(plot_diff_gamm01$est, plot_diff_gamm01$CI, f=1.0, xVals=plot_diff_gamm01$time)
+
+plot_diff_gamm01<-ggplot(data=plot_diff_gamm01, aes(x=time, y=est))+
+  geom_hline(yintercept = 0)+
+  geom_path(lty=2)+
+  geom_ribbon(aes(x=time, ymin=est-CI, ymax=est+CI), alpha=0.2)+
+  theme_bw()+
+  scale_x_continuous(name="Time (in ms)", breaks=c(seq(from = min(plot_diff_gamm01$time), to = max(plot_diff_gamm01$time)+100, by = 1000)))+ ylab("Est. difference in pupil size")+ggtitle("Eye-contact - No eye-contact")+
+    theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())+
+  geom_segment(aes(x=x$start[1], xend=x$end[1], y=0, yend=0), color="red", lwd=1.1)+
+  geom_segment(aes(x=x$start[1], xend=x$start[1], y=-10, yend=10), color="red", lwd=0.7)+
+  geom_segment(aes(x=x$end[1], xend=x$end[1], y=-10, yend=10), color="red", lwd=0.7)+
+  geom_segment(aes(x=x$start[2], xend=x$end[2], y=0, yend=0), color="red", lwd=1.1)+
+  geom_segment(aes(x=x$start[2], xend=x$start[2], y=-10, yend=10), color="red", lwd=0.7)#+
+  # geom_segment(aes(x=x$end[2], xend=x$end[2], y=-10, yend=10), color="red", lwd=0.7)+
+  #   geom_segment(aes(x=x$start[3], xend=x$end[3], y=0, yend=0), color="red", lwd=1.1)+
+  # geom_segment(aes(x=x$start[3], xend=x$start[3], y=-10, yend=10), color="red", lwd=0.7)+
+  # geom_segment(aes(x=x$end[3], xend=x$end[3], y=-10, yend=10), color="red", lwd=0.7)+
+  #   geom_segment(aes(x=x$start[4], xend=x$end[4], y=0, yend=0), color="red", lwd=1.1)+
+  # geom_segment(aes(x=x$start[4], xend=x$start[4], y=-10, yend=10), color="red", lwd=0.7)+
+  # geom_segment(aes(x=x$end[4], xend=x$end[4], y=-10, yend=10), color="red", lwd=0.7)
+  
+ggsave(plot_diff_gamm01, filename = "graphics/actionphase_GAMM1_diffcurve.png", width=6, height=5, scale=0.7)
+
+```
+* plotting partial effects
+```{r}
+library(mgcViz)
+b <- getViz(gamm01)
+
+png("graphics/actionphase_GAMM1_partial_effect.png", width=25, height=20, units="cm", res=600)
+p1<-plot(b, allTerms = T)+theme_classic() + labs(title = NULL) 
+print(p1, pages = 1 )
+dev.off()
+
+
+```
+
+* Summed effects
+```{r}
+col2 = "darkorange"
+col3 = "dodgerblue"
+
+png("graphics/actionphase_GAMM1_summed_effect.png", width=14, height=10, units="cm", res=600)
+plot_smooth(gamm01, view="time", cond=list(condition="NCOM"), rm.ranef=TRUE,
+  v0=0, col=col2, lwd=2, lty=6, rug=FALSE, se=1.96,
+  main="", ylab="Pupil (baseline corrected)", las=1,)
+plot_smooth(gamm01, view="time", cond=list(condition="COM"), rm.ranef=TRUE,
+  v0=0, col=col3, lwd=2, lty=6, rug=FALSE, add=TRUE, xpd=TRUE, se=1.96)
+
+
+# legend
+legend('bottomright',
+       legend=c('No eye-contact', "Eye-contact"),
+       lty=rep(c(1,6), each=2), lwd=rep(c(1,2), each=2),
+       col=rep(c(col2, col3), 2), seg.len=1.5,
+       bty='n', cex=.85, ncol=2, xpd=TRUE)
+
+dev.off()
+
+```
+
+```{r}
+
+tmp <- gamm01$model
+#tmp$Event <- interaction(tmp$subject, tmp$condition, drop=TRUE)
+plot_modelfit(gamm01, view="time", event=tmp$Event,n = 5)
+
+```
+
+
+
+
+### Adding screenshots
+
+
+
+```{r}
+library(cowplot)
+#library(magick)
+com01_photo <- "screenshots/com01.png"
+com02_photo <- "screenshots/com02.png"
+com03_photo <- "screenshots/com03.png"
+ncom01_photo <- "screenshots/ncom01.png"
+ncom02_photo <- "screenshots/ncom02.png"
+ncom03_photo <- "screenshots/ncom03.png"
+outcome_identity_photo <- "screenshots/outcome_identity.png"
+outcome_location_photo <- "screenshots/outcome_location.png"
+outcome_no_photo <- "screenshots/outcome_no.png"
+
+com01_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(com01_photo)
+com02_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0,0), "cm"))) + draw_image(com02_photo)
+com03_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(com03_photo)
+ncom01_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(ncom01_photo)
+ncom02_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0,0), "cm"))) + draw_image(ncom02_photo)
+ncom03_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(ncom03_photo)
+outcome_identity_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(outcome_identity_photo)
+outcome_location_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0,0), "cm"))) + draw_image(outcome_location_photo)
+outcome_no_photo <- ggdraw(theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))) + draw_image(outcome_no_photo)
+```
+
+
+```{r}
+pics_com<-plot_grid(com01_photo, com02_photo, com03_photo, ncol=1)
+pics_ncom<-plot_grid(ncom01_photo, ncom02_photo, ncom03_photo, ncol=1)
+pics_outcom<-plot_grid(outcome_no_photo, outcome_identity_photo, outcome_location_photo, ncol=1, labels = c("   No change", " Identity change", "Location change"), label_x = -0.1, label_y = 0.9, label_colour = "white", label_fontface = "plain", label_size = 10)
+
+
+pg1<-plot_grid(pics_com, pics_ncom, pics_outcom, ncol=3, labels = c("Eye-contact", "No eye-contact", "Outcome"),  label_colour = "white", label_fontface = "plain", hjust = -0.3)
+pg1
+ggsave(pg1, file="graphics/screenshots.jpg", width = 11, height = 6.1, scale=0.8)
+
+
+
+```
+
+
+# Combine plots
+
+```{r}
+library(cowplot)
+pg2<-plot_grid(plot_pupil_group, plot_diff_gamm01, rel_widths = c(2,1),labels=c("D", "E"), nrow = 1)
+```
+
+
+```{r}
+load(file = "workspaces/dog_identity_change_AOIreport_analysis.RData")
+pg3<-plot_grid(dwell_time_outcome_phase.plot_z,latency_outcome_phase.plot, ncol=2, labels = c("B", "C"))
+```
+
+```{r}
+pg4<-plot_grid(pg1, pg3, pg2, labels=c("A", NULL, NULL), rel_heights=c(2,1,1), ncol = 1, label_colour = "white")
+
+pg4
+```
+
+
+```{r}
+ggsave(pg4, filename = "graphics/dog_identity_change_plotgrid.tiff", width = 12, height=13.2, scale=1)
+
+```
+

@@ -1,0 +1,633 @@
+---
+title: Dog Identity Change: Sample Report analysis
+author: Christoph Voelter, Andrea Sommese
+date: 20/12/2024
+output: html_document
+---
+notes: 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(tidyverse)
+library(glmmTMB)
+library(arrow)
+library(gazer)
+source("./functions/diagnostic_fcns.r")
+source("./functions/glmm_stability.r")
+source("./functions/boot_glmm.r")
+source("./functions/boot_glmm2.r")
+source("./functions/glmmTMB_stability.r")
+source("./functions/drop1_para_glmmtmb.r")
+source("./functions/extract_ranef_gmmTMB.r")
+source("./functions/boot_glmmTMB.r")
+#load("workspaces/dog_identity_change_samplereport_analysis.RData")
+```
+
+
+
+### Notes:
+
+36 dogs started with the experiment but only 34 completed all test sessions. One additional dog (Floki) completed the first test session (included). Another dog (Raya) started with the pretest but became unavailable before the start of the test phase. 
+
+Saved with the IP relative setting in DataViewer.
+
+
+# Loading sample report
+```{r}
+# Set the directory path where the parquet files are saved
+parquet_dir <- "data/raw_data/"
+
+# List all parquet files in the directory
+parquet_files <- list.files(path = parquet_dir, pattern = "\\.parquet$", full.names = TRUE)
+
+# Read all parquet files and combine them into one dataframe
+sample.data <- parquet_files %>%
+  lapply(read_parquet) %>%
+  bind_rows()
+table(sample.data$subject, sample.data$trial_overall)
+table(sample.data$subject, sample.data$trial_overall, sample.data$IP_LABEL)
+table(sample.data$subject, sample.data$Trial_Index_)
+#str(sample.data, list.len=ncol(df))
+```
+
+
+
+*IA report
+```{r}
+aoi_data <- read_delim("data/dog_identity_change_IA_report.txt", na=".", delim="\t")%>%
+  mutate(IA_LABEL = dplyr::recode(as.factor(IA_LABEL), upper_object="up", lower_object="down", actor_left="left", actor_right="right"))
+table(aoi_data$IA_LABEL, aoi_data$IP_LABEL)
+levels(as.factor(aoi_data$test_phase))
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+table(aoi_data$subject_session, aoi_data$trial_w_session)
+length(levels(as.factor(aoi_data$subject_session)))
+
+aoi_data_filter <- aoi_data %>%
+  group_by(RECORDING_SESSION_LABEL, trial_overall)%>%
+  summarise(filter_variable = sum(IA_AVERAGE_FIX_PUPIL_SIZE, na.rm = TRUE))%>%
+  ungroup()%>%
+  mutate(filter_variable = ifelse(filter_variable == 0, NA, 1))
+
+aoi_data2 <- aoi_data %>%
+  inner_join(aoi_data_filter) %>%
+  filter(test_phase %in% c("FIRST-TEST")) %>% #retain only test trials
+  filter(filter_variable == 1) %>% # retain only trials in which the pupil was detected
+  filter(
+    !RECORDING_SESSION_LABEL %in% c("Hetti_3", "Melody_5", "Milo_3"),
+    !(RECORDING_SESSION_LABEL == "Joker_4" &
+        trial_overall == 8),
+    !(RECORDING_SESSION_LABEL == "Mathild2" &
+        trial_overall == 2),
+    !(RECORDING_SESSION_LABEL == "Melody_3" &
+        trial_overall == 9)
+  ) %>%  # remove trials in which they've left the chin rest or that were conducted twice due to an experimenter mistake (N=1)
+  filter(!is.na(subject), !is.na(trial_overall), !is.na(IP_LABEL))
+    
+     
+table(aoi_data$RECORDING_SESSION_LABEL, aoi_data$trial_overall)
+table(aoi_data$subject)
+levels(as.factor(aoi_data$condition))
+
+#missing: Alaska_6
+#to remove: Hetti_3, Joker_4 trial_overall 8, Mathild2 trial_overall == 2, Melody_3 trial_overall==9, Melody 5, Milo_3
+table(aoi_data2$condition, aoi_data2$subject, aoi_data2$trial_overall)
+
+#str(aoi_data2, list.len=ncol(df))
+table(aoi_data2$IA_LABEL, aoi_data2$IA_BOTTOM)
+```
+* demographic data
+
+```{r}
+demo.data <- read_csv("data/dog_identity_change_counterbalancing_exp1.csv")%>%
+  rename(subject = "Dog_ID")
+```
+
+```{r}
+
+sample.data <-  sample.data%>%
+  filter(test_phase %in% c("FIRST-TEST")) %>% #retain only test trials
+  filter(
+    !RECORDING_SESSION_LABEL %in% c("Hetti_3", "Melody_5", "Milo_3"),
+    !(RECORDING_SESSION_LABEL == "Joker_4" &
+        trial_overall == 8),
+    !(RECORDING_SESSION_LABEL == "Mathild2" &
+        trial_overall == 2),
+    !(RECORDING_SESSION_LABEL == "Melody_3" &
+        trial_overall == 9)
+  ) %>% # remove trials in which they've left the chin rest or that were conducted twice due to an experimenter mistake (N=1)
+  full_join(demo.data) %>%
+  mutate(time.frame = TIMESTAMP - IP_START_TIME) %>%
+  mutate(RIGHT_INTEREST_AREA_LABEL = dplyr::recode(as.factor(RIGHT_INTEREST_AREA_LABEL), upper_object="up", lower_object="down", actor_left="left", actor_right="right"))%>%
+  mutate(target_object_IA = ifelse(IP_LABEL== "first_video" & RIGHT_INTEREST_AREA_LABEL==object_pos, "target",
+                                   ifelse(IP_LABEL== "outcome_video" & RIGHT_INTEREST_AREA_LABEL==object_pos_outcome, "target", NA)),
+         actor_IA = ifelse(RIGHT_INTEREST_AREA_LABEL==position, "actor", NA)) %>%
+    mutate(RIGHT_GAZE_X_no_blinks = extend_blinks(
+      RIGHT_GAZE_X,
+      hz = 1000,
+      fillback = 100,
+      fillforward = 100
+    ),
+    RIGHT_GAZE_Y_no_blinks = extend_blinks(
+      RIGHT_GAZE_Y,
+      hz = 1000,
+      fillback = 100,
+      fillforward = 100
+    ),
+    RIGHT_INTEREST_AREA_LABEL = case_when(
+      is.na(RIGHT_GAZE_Y_no_blinks) |
+        is.na(RIGHT_GAZE_X_no_blinks) ~ NA_character_,
+      TRUE ~ RIGHT_INTEREST_AREA_LABEL
+    )
+  )
+
+table(sample.data$target_object_IA, sample.data$object_pos_outcome, sample.data$outcome)
+
+table(sample.data$subject, sample.data$trial_overall, sample.data$IP_LABEL)
+```
+
+
+
+
+
+```{r}
+gaze.data_total <- sample.data %>%
+  group_by(
+    RECORDING_SESSION_LABEL,
+    subject,
+    condition,
+    outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    trial_overall,
+    trial_w_session,
+    IP_LABEL,
+    IP_DURATION
+  ) %>%
+  summarise(
+    n_samples = length(RIGHT_GAZE_X),
+    onscreen_looking = sum(
+      RIGHT_GAZE_X > 0 & RIGHT_GAZE_X < 1920 &
+        RIGHT_GAZE_Y > 0 & RIGHT_GAZE_Y < 1080,
+      na.rm = TRUE                                    # Ignore NA values
+    )
+  )%>%
+  filter(onscreen_looking>0)
+
+table(gaze.data_total$condition, gaze.data_total$subject, gaze.data_total$trial_overall)
+
+
+gaze.data <- sample.data %>%
+  filter(!is.na(RIGHT_INTEREST_AREA_LABEL)) %>%
+  group_by(
+    RECORDING_SESSION_LABEL,
+    subject,
+    condition,
+    outcome,
+    position,
+    object_pos,
+    object_pos_outcome,
+    trial_overall,
+    trial_w_session,
+    IP_LABEL,
+    RIGHT_INTEREST_AREA_LABEL
+  ) %>%
+  summarise(IA_looking_time = sum(!is.na(RIGHT_INTEREST_AREA_LABEL)),
+            IA_first_visit_time = min(time.frame, na.rm=TRUE)) %>%
+  filter(!is.na(IP_LABEL))
+
+table(gaze.data$condition, gaze.data$subject, gaze.data$trial_overall)
+hist(gaze.data$IA_looking_time)
+hist(gaze.data$IA_first_visit_time)
+min(gaze.data$IA_first_visit_time)
+
+xx<-head(sample.data, 20000)
+```
+### compute first run duration
+```{r}
+# Compute first run duration
+first_run_duration <- sample.data %>%
+  group_by(RECORDING_SESSION_LABEL, subject, condition, outcome,  trial_overall, IP_LABEL) %>%
+  mutate(
+    prev_label = lag(RIGHT_INTEREST_AREA_LABEL),
+    area_change = case_when(
+      is.na(RIGHT_INTEREST_AREA_LABEL) ~ FALSE,  # Ignore NA values
+      is.na(prev_label) ~ TRUE,  # First valid entry is a new run
+      RIGHT_INTEREST_AREA_LABEL != prev_label ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    run_id = cumsum(area_change)  # Assigns a unique ID to each run
+  ) %>%
+  filter(!is.na(RIGHT_INTEREST_AREA_LABEL)) %>% # Remove NA areas
+  group_by(RECORDING_SESSION_LABEL, subject, condition, outcome,  trial_overall, IP_LABEL, RIGHT_INTEREST_AREA_LABEL, run_id) %>%
+  summarise(
+    first_run_entry_time = first(time.frame),
+    first_run_exit_time = last(time.frame),
+    first_run_duration = first_run_exit_time - first_run_entry_time,
+    .groups = "drop"
+  ) %>%
+  filter(first_run_duration>=100)%>% #only retain first runs larger than 100 msec
+  group_by(RECORDING_SESSION_LABEL, subject, condition, outcome, IP_LABEL, trial_overall, RIGHT_INTEREST_AREA_LABEL) %>%
+  filter(row_number() == 1)  # Select only the first run per interest area
+
+# View results
+print(first_run_duration)  
+  
+
+```
+
+
+```{r}
+all_combinations <- expand.grid(
+  subject = unique(gaze.data$subject),
+  RIGHT_INTEREST_AREA_LABEL = unique(sample.data$RIGHT_INTEREST_AREA_LABEL),
+  trial_overall = unique(gaze.data$trial_overall),
+  IP_LABEL = unique(gaze.data$IP_LABEL)
+) %>%
+  filter(!is.na(subject), !is.na(trial_overall), !is.na(IP_LABEL), !is.na(RIGHT_INTEREST_AREA_LABEL))%>%
+  right_join(aoi_data2 %>% dplyr::select(RECORDING_SESSION_LABEL, subject,RIGHT_INTEREST_AREA_LABEL=IA_LABEL, trial_overall, trial_w_session, IP_LABEL,  outcome, condition, object_pos, object_pos_outcome, position ))
+
+table(all_combinations$subject, all_combinations$trial_overall)
+
+
+
+
+gaze.data2 <- gaze.data %>%
+  full_join(all_combinations) %>%
+  full_join(gaze.data_total) %>%
+  full_join(first_run_duration)%>%
+  mutate(IA_looking_time = as.numeric(ifelse(
+    is.na(IA_looking_time), 0, IA_looking_time
+  )),
+  IA_looking_time_prop = IA_looking_time / IP_DURATION,
+  target_object_IA = ifelse(
+    IP_LABEL == "first_video" &
+      RIGHT_INTEREST_AREA_LABEL == object_pos,
+    "target",
+    ifelse(
+      IP_LABEL == "outcome_video" &
+        RIGHT_INTEREST_AREA_LABEL == object_pos_outcome,
+      "target",
+      NA
+    )
+  ), actor_IA = ifelse(RIGHT_INTEREST_AREA_LABEL == position, "actor", NA)
+)  %>%
+  filter(!is.na(IP_LABEL))
+```
+
+
+```{r}
+table(gaze.data2$condition, gaze.data2$subject, gaze.data2$trial_overall)
+levels(as.factor(gaze.data2$RIGHT_INTEREST_AREA_LABEL))
+levels(as.factor(gaze.data2$IP_LABEL))
+levels(as.factor(gaze.data2$actor_IA))
+hist(gaze.data2$IA_looking_time)
+```
+
+### Inclusion criteria
+
+
+```{r}
+gaze_detected_per_action <- gaze.data2%>%
+  filter(!is.na(condition), target_object_IA== "target") %>%
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL) %>%
+  summarise(IP_look_prop = onscreen_looking/IP_DURATION)%>%
+  ungroup()%>%
+  filter(IP_LABEL == "first_video", IP_look_prop<0.7)
+#18 trials should be removed because the dogs did not look at the first video sufficiently
+
+gaze_detected_per_outcome <- gaze.data2%>%
+  filter(!is.na(condition), target_object_IA== "target") %>%
+  group_by(RECORDING_SESSION_LABEL, condition, subject, trial_overall, IP_LABEL, target_object_IA, outcome) %>%
+  summarise(mean_object_IA_look = mean(IA_looking_time))%>%
+  ungroup()%>%
+  filter(IP_LABEL == "outcome_video", mean_object_IA_look<100)
+
+
+filter_data_actionphase <- gaze_detected_per_action %>%
+  dplyr::select(-IP_look_prop, -IP_LABEL)
+
+filter_data_outcome <- gaze_detected_per_outcome %>%
+  dplyr::select(-mean_object_IA_look, -IP_LABEL)
+```
+
+
+## Gamma model
+
+### Looking time data
+```{r}
+outcome_target_data <- gaze.data2 %>%
+  filter(!is.na(condition),
+         target_object_IA == "target",
+         IP_LABEL == "outcome_video") %>%
+  anti_join(filter_data_actionphase) %>%
+  anti_join(filter_data_outcome) %>%
+  mutate(trial = as.numeric(
+    ifelse(
+      trial_overall > 3 & trial_overall < 7,
+      trial_overall - 3,
+      ifelse(
+        trial_overall > 6 &
+          trial_overall < 10,
+        trial_overall - 6,
+        ifelse(trial_overall > 9, trial_overall -
+                 9, trial_overall)
+      )
+    )
+  )) %>%
+  filter(IA_first_visit_time > 0) # only dogs that actively look at object
+
+
+outcome_target_data_agg2 <- outcome_target_data %>%
+  group_by(subject) %>%
+  summarise(mean_individual_looking_time = mean(IA_looking_time, na.rm=TRUE),
+            sd_individual_looking_time = sd(IA_looking_time, na.rm=TRUE))
+
+outcome_target_data <- outcome_target_data %>%
+  full_join(outcome_target_data_agg2)%>%
+  mutate(looking_time_z = (IA_looking_time-mean_individual_looking_time)/sd_individual_looking_time)
+
+
+hist(outcome_target_data$IA_looking_time)
+hist(outcome_target_data$looking_time_z)
+levels(as.factor(outcome_target_data$trial_overall))
+levels(as.factor(outcome_target_data$trial))
+levels(as.factor(outcome_target_data$condition))
+levels(as.factor(outcome_target_data$outcome))
+levels(as.factor(outcome_target_data$object_pos_outcome))
+levels(as.factor(outcome_target_data$subject))
+
+```
+
+
+```{r}
+contr <-
+  glmmTMBControl(optCtrl = list(iter.max = 100000000, eval.max = 100000000))
+```
+
+prepare predictor variables
+```{r}
+outcome_target_data$z.trial2<-as.vector(scale(outcome_target_data$trial_overall, center = TRUE, scale=TRUE))
+
+outcome_target_data$outcome<-relevel(as.factor(outcome_target_data$outcome), ref = "NO")
+levels(outcome_target_data$outcome)
+
+
+outcome_target_data$condition.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$condition)), center = TRUE, scale = FALSE))
+outcome_target_data$object_pos_outcome.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$object_pos_outcome)), center = TRUE, scale = FALSE))
+outcome_target_data$outcome.c <- as.vector(scale(as.numeric(as.factor(outcome_target_data$outcome)), center = TRUE, scale = FALSE))
+outcome_target_data$outcome_rel <- relevel(as.factor(outcome_target_data$outcome), ref="IDENTITY")
+outcome_target_data$outcome_rel2 <- relevel(as.factor(outcome_target_data$outcome), ref="LOCATION")
+
+summary(outcome_target_data)
+```
+
+
+
+
+fit model
+
+```{r}
+
+m1_dwelltime_outcome = glmmTMB(
+ IA_looking_time ~ condition*outcome +object_pos_outcome+ z.trial2+
+    (1 +  object_pos_outcome.c+ z.trial2 +condition.c || subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_outcome)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_outcome, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+--> assumptions violated
+
+### lmer approach using within-subject z scores
+
+
+```{r}
+library(lme4)
+m1_dwelltime_outcome_lmer_lme4 = lme4::lmer(
+  looking_time_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+
+drop1(m1_dwelltime_outcome_lmer_lme4, test = "Chisq")
+m1_dwelltime_outcome_lmer_lme4_null = lme4::lmer(
+  looking_time_z ~ 1 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 | subject), 
+  data = outcome_target_data,
+  REML = FALSE,
+  control = lmerControl(optCtrl=list(maxfun=10000000), optimizer = "bobyqa"))
+anova(m1_dwelltime_outcome_lmer_lme4, m1_dwelltime_outcome_lmer_lme4_null, test="Chisq")
+```
+```{r}
+library(DHARMa)
+testDispersion(m1_dwelltime_outcome_lmer_lme4)
+simulationOutput <- simulateResiduals(fittedModel = m1_dwelltime_outcome_lmer_lme4, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+
+
+Assumptions and stability
+```{r}
+diagnostics.plot(m1_dwelltime_outcome_lmer_lme4)
+ranef.diagn.plot(m1_dwelltime_outcome_lmer_lme4)
+```
+LRT
+```{r}
+m1_dwelltime_outcome_lmer_lme4_drop1 <- drop1(m1_dwelltime_outcome_lmer_lme4, test="Chisq")
+m1_dwelltime_outcome_lmer_lme4_drop1
+m1_dwelltime_outcome_lmer_lme4_drop1<- m1_dwelltime_outcome_lmer_lme4_drop1%>% 
+  filter(!is.na(npar)) %>% 
+  add_row(npar = rep(NA,4),  .before = 1) %>% 
+  add_row(npar = rep(NA,1),  .after = 7) 
+```
+
+```{r}
+library(lmerTest)
+m1_dwelltime_outcome_lmertest = lmerTest::lmer(
+  looking_time_z ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_outcome_lmertest)
+diagnostics.plot(m1_dwelltime_outcome_lmertest)
+```
+
++ Collinearity checks
+```{r}
+library(car)
+xx=lm(looking_time_z ~ condition+outcome +object_pos_outcome+ z.trial2, data=outcome_target_data)
+vif(xx)
+```
+
+Relevelling of reference category of outcome condition
+```{r}
+
+outcome_target_data$outcome_rel <- relevel(as.factor(outcome_target_data$outcome), ref="IDENTITY")
+outcome_target_data$outcome_rel2 <- relevel(as.factor(outcome_target_data$outcome), ref="LOCATION")
+
+
+m1_dwelltime_outcome_lmertest_rel1 = lmerTest::lmer(
+  looking_time_z ~ condition*outcome_rel +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+m1_dwelltime_outcome_lmertest_rel2 = lmerTest::lmer(
+  looking_time_z ~ condition*outcome_rel2 +object_pos_outcome+ z.trial2 +
+    (1 + object_pos_outcome+ z.trial2 + condition.c|| subject), #pruned due to convergence warning
+  data = outcome_target_data,
+  REML = TRUE)
+
+summary(m1_dwelltime_outcome_lmertest_rel1)
+summary(m1_dwelltime_outcome_lmertest_rel2)
+```
+ + confidence intervals
+
+```{r}
+boot.m1_dwelltime_outcome_lmer_lme4=boot.lmer(model.res=m1_dwelltime_outcome_lmer_lme4, excl.warnings=F,	nboots=1000, para=T, n.cores = "all-1", resol=1000, level=0.95)
+
+res.m1_dwelltime_outcome_lmer_lme4<-round(boot.m1_dwelltime_outcome_lmer_lme4$ci.estimates, 3)
+res.m1_dwelltime_outcome_lmer_lme4
+```
+
+##### Output table
+```{r}
+
+model_table_m1_dwelltime_outcome_lmer_lme4<- bind_cols(as.data.frame(summary(m1_dwelltime_outcome_lmer_lme4)$coefficients[,1:2]),
+                             summary(m1_dwelltime_outcome_lmertest)$coefficients[,3:5],
+                             res.m1_dwelltime_outcome_lmer_lme4,
+                             m1_dwelltime_outcome_lmer_lme4_drop1)%>%
+  select(Estimate, SE = `Std. Error`, t =`t value`, df, p=`Pr(>|t|)`, LowerCI = X2.5., UpperCI = X97.5., Chi2 = LRT, df_LRT = npar, p_LRT = `Pr(Chi)`,) %>%  
+  mutate(across(.cols = c(p, p_LRT), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:t), ~ format(round(.x, 2), nsmall=2))) %>% 
+  mutate(across(.cols = c(LowerCI:Chi2), ~ format(round(.x, 2), nsmall=2))) 
+
+
+write.csv(model_table_m1_dwelltime_outcome_lmer_lme4, file = "saves/mm1_samplebased_lookingtime_zscores_lmer_output_table.csv")
+```
+
+
+
+
+
+
+
+
+
+
+### First look analysis (duration of first run)
+
+fit model
+```{r}
+
+outcome_target_data <- outcome_target_data %>%
+  filter(!is.na(first_run_duration))
+m1_firstlook_outcome = glmmTMB(
+  first_run_duration ~ condition*outcome +object_pos_outcome+ z.trial2 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+m1_firstlook_outcome_null = glmmTMB(
+  first_run_duration ~ 1+
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+anova(m1_firstlook_outcome, m1_firstlook_outcome_null, test="Chisq") #full null not significant
+summary(m1_firstlook_outcome)
+```
+
+```{r}
+m2_firstlook_outcome = glmmTMB(
+  first_run_duration ~ condition+outcome +object_pos_outcome+ 
+    (1 + condition.c + outcome.c + object_pos_outcome.c+ z.trial2 || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+
+m2_firstlook_outcome_null = glmmTMB(
+  first_run_duration ~ 1 +
+    (1 + condition.c + outcome.c + object_pos_outcome.c || subject),
+  data = outcome_target_data,
+  family = Gamma(link="log")
+)
+anova(m2_firstlook_outcome, m2_firstlook_outcome_null, test="Chisq")
+summary(m2_firstlook_outcome)
+drop1(m2_firstlook_outcome, test = "Chisq")
+```
+
+```{r}
+library(DHARMa)
+testDispersion(m1_firstlook_outcome)
+simulationOutput <- simulateResiduals(fittedModel = m1_firstlook_outcome, plot = F)
+#residuals(simulationOutput)
+plot(simulationOutput)
+```
+
+
+
+
+
+LRT
+```{r}
+m1_firstlook_outcome_drop1 <- drop1(m1_firstlook_outcome, test="Chisq")
+m1_firstlook_outcome_drop1
+m1_firstlook_outcome_drop1<- m1_firstlook_outcome_drop1%>% 
+  filter(!is.na(Df)) %>% 
+  add_row(Df = rep(NA,4),  .before = 1) %>% 
+  add_row(Df = rep(NA,1),  .after = 7) 
+```
+ 
+
++ check for overdispersion
+```{r}
+overdisp.test(m1_firstlook_outcome)
+```
+--> quite underdispersed
+
++ Collinearity checks
+```{r}
+library(car)
+xx=lm(first_run_duration ~ condition+outcome +object_pos_outcome+ z.trial2,  data = outcome_target_data)
+vif(xx)
+```
+
+```{r eval=FALSE}
+m1_firstlook_outcome.ci=boot.glmmtmb(m1_firstlook_outcome, 
+nboots=1000, para=T, n.cores=2, resol=1000, level=0.95, data=  outcome_target_data,
+)
+```
+
+#### output table: first look
+
+```{r}
+m1_firstlook_outcome_table <- bind_cols(as.data.frame(summary(m1_firstlook_outcome)$coefficients$cond),
+                                      m1_firstlook_outcome_drop1,
+                                     m1_firstlook_outcome.ci$ci.estimates$fe[1:8,]) %>%
+  dplyr::select(Estimate, SE = `Std. Error`, LowerCI = X2.5., UpperCI = X97.5.,Chi2 = LRT, df = Df, p = `Pr(>Chi)`, z_wald=`z value`, p_wald=`Pr(>|z|)`) %>% # 
+  mutate(across(.cols = c(p), ~ format(round(.x, 3), nsmall=3))) %>% 
+  mutate(across(.cols = c(Estimate:Chi2), ~ format(round(.x, 2), nsmall=2))) %>% 
+  #mutate(across(Chi2:p, ~replace_na(.x, "")))%>%
+  mutate(p=replace(p, p==0, "<0.001"))
+
+write.csv(m1_firstlook_outcome_table, file = "saves/m1_firstlook_samplebased_outcome_table_final.csv")
+```
+
+
+
+```{r}
+save.image(file = "workspaces/dog_identity_change_samplereport_lookingtime_analysis.RData")
+```
